@@ -63,6 +63,9 @@ func proxy(ctx context.Context, args []string) error {
 		return fmt.Errorf("apply server metadata: %w", err)
 	}
 	server := mcp.NewServer(implementation, &mcp.ServerOptions{Instructions: instructions, Logger: slog.Default()})
+	if err := attachPassthroughPrimitives(ctx, server, session, entry); err != nil {
+		return err
+	}
 	for _, upstreamTool := range tools {
 		if !entry.Allowed(upstreamTool.Name) {
 			continue
@@ -364,6 +367,87 @@ func matchesSelector(candidate, selector map[string]any) bool {
 		}
 	}
 	return true
+}
+
+func attachPassthroughPrimitives(ctx context.Context, server *mcp.Server, session *mcp.ClientSession, entry config.Entry) error {
+	initialized := session.InitializeResult()
+	if initialized == nil || initialized.Capabilities == nil {
+		return nil
+	}
+	if initialized.Capabilities.Prompts != nil {
+		prompts, err := session.ListPrompts(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("list upstream prompts: %w", err)
+		}
+		for _, upstreamPrompt := range prompts.Prompts {
+			prompt, err := overlayMetadata("prompts/list", upstreamPrompt, entry.Metadata.Patches)
+			if err != nil {
+				return fmt.Errorf("apply metadata for prompt %q: %w", upstreamPrompt.Name, err)
+			}
+			name := upstreamPrompt.Name
+			server.AddPrompt(prompt, func(callCtx context.Context, request *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				params := *request.Params
+				params.Name = name
+				return session.GetPrompt(callCtx, &params)
+			})
+		}
+	}
+	if initialized.Capabilities.Resources != nil {
+		resources, err := session.ListResources(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("list upstream resources: %w", err)
+		}
+		for _, upstreamResource := range resources.Resources {
+			resource, err := overlayMetadata("resources/list", upstreamResource, entry.Metadata.Patches)
+			if err != nil {
+				return fmt.Errorf("apply metadata for resource %q: %w", upstreamResource.URI, err)
+			}
+			server.AddResource(resource, func(callCtx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+				params := *request.Params
+				return session.ReadResource(callCtx, &params)
+			})
+		}
+		templates, err := session.ListResourceTemplates(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("list upstream resource templates: %w", err)
+		}
+		for _, upstreamTemplate := range templates.ResourceTemplates {
+			template, err := overlayMetadata("resources/templates/list", upstreamTemplate, entry.Metadata.Patches)
+			if err != nil {
+				return fmt.Errorf("apply metadata for resource template %q: %w", upstreamTemplate.URITemplate, err)
+			}
+			server.AddResourceTemplate(template, func(callCtx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+				params := *request.Params
+				return session.ReadResource(callCtx, &params)
+			})
+		}
+	}
+	return nil
+}
+
+func overlayMetadata[T any](method string, value *T, patches []config.Patch) (*T, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var candidate map[string]any
+	if err := json.Unmarshal(encoded, &candidate); err != nil {
+		return nil, err
+	}
+	for _, patch := range patches {
+		if patch.Method == method && matchesSelector(candidate, patch.Select) {
+			candidate = config.MergePatch(candidate, patch.Patch)
+		}
+	}
+	encoded, err = json.Marshal(candidate)
+	if err != nil {
+		return nil, err
+	}
+	var result T
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func overlayServer(entryName string, session *mcp.ClientSession, patch map[string]any) (*mcp.Implementation, string, error) {

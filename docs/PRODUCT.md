@@ -80,7 +80,7 @@ Codex / Claude config
 
 `metadata.server` и `metadata.tools.<name>` — краткая форма для наиболее частых случаев. Они позволяют подменять или дополнять `description`, `title`, `annotations`, `icons`, `_meta`, `inputSchema`, `outputSchema`, `instructions` и будущие поля протокола.
 
-Для любой другой metadata вводится универсальный `metadata.patches`: массив `{ "method", "select", "patch" }`. `method` выбирает upstream-ответ (например, `resources/list`), `select` выбирает элемент по устойчивому идентификатору, а `patch` накладывается как JSON Merge Patch. Это позволяет менять metadata prompts, resources и других MCP-структур без добавления новой схемы на каждое поле. Такой overlay не означает фильтрацию этих primitives: prompts/resources в MVP передаются как есть.
+Для любой другой metadata вводится универсальный `metadata.patches`: массив `{ "method", "select", "patch" }`. `method` выбирает upstream-ответ (сейчас поддержаны `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`), `select` выбирает элемент по устойчивому идентификатору, а `patch` накладывается как JSON Merge Patch. Это позволяет менять metadata prompts и resources без добавления новой схемы на каждое поле. Такой overlay не означает фильтрацию этих primitives: prompts/resources в MVP передаются как есть.
 
 Патч применяется только к неисполняемой части структур ответа upstream, не к значениям tool call/results.
 

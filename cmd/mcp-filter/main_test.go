@@ -156,7 +156,7 @@ func TestConnectLegacySSEUpstream(t *testing.T) {
 
 func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"],"metadata":{"patches":[{"method":"tools/list","select":{"name":"visible"},"patch":{"title":"Visible issue"}}]}}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"],"metadata":{"patches":[{"method":"tools/list","select":{"name":"visible"},"patch":{"title":"Visible issue"}},{"method":"prompts/list","select":{"name":"status"},"patch":{"title":"Project status"}},{"method":"resources/list","select":{"uri":"test://item"},"patch":{"title":"Project resource"}}]}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,6 +185,24 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	}
 	if list.Tools[0].Title != "Visible issue" {
 		t.Fatalf("generic metadata patch was not applied: %#v", list.Tools[0])
+	}
+	prompts, err := session.ListPrompts(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts.Prompts) != 1 || prompts.Prompts[0].Title != "Project status" {
+		t.Fatalf("unexpected proxied prompts: %#v", prompts.Prompts)
+	}
+	resources, err := session.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources.Resources) != 1 || resources.Resources[0].Title != "Project resource" {
+		t.Fatalf("unexpected proxied resources: %#v", resources.Resources)
+	}
+	resourceResult, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "test://item"})
+	if err != nil || len(resourceResult.Contents) != 1 || resourceResult.Contents[0].Text != "resource content" {
+		t.Fatalf("unexpected proxied resource: %#v, %v", resourceResult, err)
 	}
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "visible", Arguments: map[string]any{"issue": "ABC-1"}})
@@ -310,6 +328,12 @@ func runE2EUpstream(ctx context.Context) error {
 		case <-time.After(time.Second):
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "too late"}}}, nil
 		}
+	})
+	server.AddPrompt(&mcp.Prompt{Name: "status", Description: "original prompt"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{Role: mcp.Role("user"), Content: &mcp.TextContent{Text: "status"}}}}, nil
+	})
+	server.AddResource(&mcp.Resource{URI: "test://item", Name: "item", Description: "original resource"}, func(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "test://item", Text: "resource content"}}}, nil
 	})
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
