@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,6 +123,103 @@ func TestConnectLegacySSEUpstream(t *testing.T) {
 	if len(tools) != 1 || tools[0].Name != "visible" {
 		t.Fatalf("unexpected tools: %#v", tools)
 	}
+}
+
+func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-client", Version: "1"}, nil)
+	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	list, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Tools) != 1 || list.Tools[0].Name != "visible" {
+		t.Fatalf("unexpected published tools: %#v", list.Tools)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "visible", Arguments: map[string]any{"issue": "ABC-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("unexpected result content: %#v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || text.Text != "forwarded:ABC-1" {
+		t.Fatalf("unexpected forwarded result: %#v", result.Content)
+	}
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "hidden", Arguments: map[string]any{}}); err == nil {
+		t.Fatal("hidden tool call unexpectedly succeeded")
+	}
+}
+
+func TestMCPFilterHelperProcess(t *testing.T) {
+	if os.Getenv("MCP_FILTER_TEST_HELPER") != "1" {
+		return
+	}
+	args := helperArguments()
+	if len(args) == 0 {
+		os.Exit(2)
+	}
+	var err error
+	switch args[0] {
+	case "proxy":
+		err = proxy(context.Background(), args[1:])
+	case "upstream":
+		err = runE2EUpstream(context.Background())
+	default:
+		err = fmt.Errorf("unknown helper command %q", args[0])
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func helperArguments() []string {
+	for index, argument := range os.Args {
+		if argument == "--" && index+1 < len(os.Args) {
+			return os.Args[index+1:]
+		}
+	}
+	return nil
+}
+
+func runE2EUpstream(ctx context.Context) error {
+	server := mcp.NewServer(&mcp.Implementation{Name: "fake-upstream", Version: "1"}, nil)
+	server.AddTool(&mcp.Tool{Name: "visible", InputSchema: map[string]any{"type": "object"}}, func(_ context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var arguments struct {
+			Issue string `json:"issue"`
+		}
+		if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
+			return nil, err
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "forwarded:" + arguments.Issue}}}, nil
+	})
+	server.AddTool(&mcp.Tool{Name: "hidden", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "must not be exposed"}}}, nil
+	})
+	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
 func connectRemoteForTest(t *testing.T, transport, endpoint string) []*mcp.Tool {
