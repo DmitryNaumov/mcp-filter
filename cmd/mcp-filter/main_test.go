@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sourcecraft/mcp-filter/internal/config"
 )
 
 func TestOverlayToolPreservesNameAndMergesMetadata(t *testing.T) {
@@ -68,6 +69,24 @@ func TestOverlayToolRejectsToolRename(t *testing.T) {
 	tool := &mcp.Tool{Name: "get_issue", InputSchema: map[string]any{"type": "object"}}
 	if _, err := overlayTool(tool, map[string]any{"name": "other"}); err == nil {
 		t.Fatal("renaming a tool should fail")
+	}
+}
+
+func TestToolMetadataPatchMergesNamedAndGenericPatches(t *testing.T) {
+	entry := config.Entry{Metadata: config.Metadata{
+		Tools: map[string]map[string]any{"get_issue": {"description": "named override"}},
+		Patches: []config.Patch{{
+			Method: "tools/list",
+			Select: map[string]any{"name": "get_issue"},
+			Patch:  map[string]any{"title": "Read issue"},
+		}},
+	}}
+	patch, err := toolMetadataPatch(entry, &mcp.Tool{Name: "get_issue", InputSchema: map[string]any{"type": "object"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patch["description"] != "named override" || patch["title"] != "Read issue" {
+		t.Fatalf("unexpected metadata patch: %#v", patch)
 	}
 }
 
@@ -127,7 +146,7 @@ func TestConnectLegacySSEUpstream(t *testing.T) {
 
 func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"],"metadata":{"patches":[{"method":"tools/list","select":{"name":"visible"},"patch":{"title":"Visible issue"}}]}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,6 +172,9 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	}
 	if len(list.Tools) != 1 || list.Tools[0].Name != "visible" {
 		t.Fatalf("unexpected published tools: %#v", list.Tools)
+	}
+	if list.Tools[0].Title != "Visible issue" {
+		t.Fatalf("generic metadata patch was not applied: %#v", list.Tools[0])
 	}
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "visible", Arguments: map[string]any{"issue": "ABC-1"}})

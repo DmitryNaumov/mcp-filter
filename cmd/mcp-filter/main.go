@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,7 +63,11 @@ func proxy(ctx context.Context, args []string) error {
 		if !entry.Allowed(upstreamTool.Name) {
 			continue
 		}
-		tool, err := overlayTool(upstreamTool, entry.Metadata.Tools[upstreamTool.Name])
+		patch, err := toolMetadataPatch(entry, upstreamTool)
+		if err != nil {
+			return fmt.Errorf("select metadata for tool %q: %w", upstreamTool.Name, err)
+		}
+		tool, err := overlayTool(upstreamTool, patch)
 		if err != nil {
 			return fmt.Errorf("apply metadata for tool %q: %w", upstreamTool.Name, err)
 		}
@@ -319,6 +324,35 @@ func overlayTool(tool *mcp.Tool, patch map[string]any) (*mcp.Tool, error) {
 		return nil, errors.New("metadata patch cannot change tool name")
 	}
 	return &result, nil
+}
+
+func toolMetadataPatch(entry config.Entry, tool *mcp.Tool) (map[string]any, error) {
+	patch := config.MergePatch(nil, entry.Metadata.Tools[tool.Name])
+	encoded, err := json.Marshal(tool)
+	if err != nil {
+		return nil, err
+	}
+	var candidate map[string]any
+	if err := json.Unmarshal(encoded, &candidate); err != nil {
+		return nil, err
+	}
+	for _, genericPatch := range entry.Metadata.Patches {
+		if genericPatch.Method != "tools/list" || !matchesSelector(candidate, genericPatch.Select) {
+			continue
+		}
+		patch = config.MergePatch(patch, genericPatch.Patch)
+	}
+	return patch, nil
+}
+
+func matchesSelector(candidate, selector map[string]any) bool {
+	for key, expected := range selector {
+		actual, ok := candidate[key]
+		if !ok || !reflect.DeepEqual(actual, expected) {
+			return false
+		}
+	}
+	return true
 }
 
 func overlayServer(entryName string, session *mcp.ClientSession, patch map[string]any) (*mcp.Implementation, string, error) {
