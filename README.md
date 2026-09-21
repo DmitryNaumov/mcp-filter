@@ -10,6 +10,8 @@
 
 Проверка без запуска upstream: `mcp-filter validate --entry tracker`. Для сверки allowlist с фактическим сервером: `mcp-filter validate --check-upstream --entry tracker --transport stdio -- npx -y @acme/tracker-mcp`.
 
+По умолчанию вызов upstream-инструмента ограничен 120 секундами. Измените предел флагом `--timeout 30s`; `--timeout 0` отключает ограничение.
+
 ## Целевой сценарий
 
 1. Нативные `.mcp.json` и `config.toml` по-прежнему регистрируют реальные MCP-серверы и содержат их команды, URL, аргументы и параметры подключения.

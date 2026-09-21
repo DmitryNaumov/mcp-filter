@@ -122,6 +122,16 @@ func TestParseProxyFlags(t *testing.T) {
 	}
 }
 
+func TestParseProxyFlagsUsesConfiguredToolTimeout(t *testing.T) {
+	opts, _, err := parseProxyFlags([]string{"--entry", "tracker", "--timeout", "3s", "--", "fake-mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.timeout != 3*time.Second {
+		t.Fatalf("unexpected timeout: %s", opts.timeout)
+	}
+}
+
 func TestConnectStreamableHTTPUpstream(t *testing.T) {
 	upstream := testUpstream()
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return upstream }, nil))
@@ -194,13 +204,36 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	}
 }
 
+func TestProxyTimesOutUpstreamToolCall(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["slow"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--timeout", "10ms", "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "timeout-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "slow", Arguments: map[string]any{}}); err == nil {
+		t.Fatal("slow tool call unexpectedly succeeded")
+	}
+}
+
 func TestValidateUpstreamRejectsMissingAllowedTool(t *testing.T) {
 	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
 	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible","missing"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := validate([]string{
+	err := validate(context.Background(), []string{
 		"--check-upstream", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
 	})
@@ -215,7 +248,7 @@ func TestValidateUpstreamAcceptsMatchingAllowlist(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validate([]string{
+	if err := validate(context.Background(), []string{
 		"--check-upstream", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
 	}); err != nil {
@@ -269,6 +302,14 @@ func runE2EUpstream(ctx context.Context) error {
 	})
 	server.AddTool(&mcp.Tool{Name: "hidden", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "must not be exposed"}}}, nil
+	})
+	server.AddTool(&mcp.Tool{Name: "slow", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "too late"}}}, nil
+		}
 	})
 	return server.Run(ctx, &mcp.StdioTransport{})
 }

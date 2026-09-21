@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"reflect"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sourcecraft/mcp-filter/internal/config"
@@ -23,13 +26,14 @@ func main() {
 	if len(os.Args) < 2 {
 		fatal("usage: mcp-filter <proxy|validate|inspect|version>")
 	}
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	var err error
 	switch os.Args[1] {
 	case "proxy":
 		err = proxy(ctx, os.Args[2:])
 	case "validate":
-		err = validate(os.Args[2:])
+		err = validate(ctx, os.Args[2:])
 	case "inspect":
 		err = inspect(ctx, os.Args[2:])
 	case "version":
@@ -79,15 +83,20 @@ func proxy(ctx context.Context, args []string) error {
 					return nil, fmt.Errorf("decode tool arguments: %w", err)
 				}
 			}
+			if opts.timeout > 0 {
+				var cancel context.CancelFunc
+				callCtx, cancel = context.WithTimeout(callCtx, opts.timeout)
+				defer cancel()
+			}
 			return session.CallTool(callCtx, &mcp.CallToolParams{Name: name, Arguments: arguments})
 		})
 	}
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
-func validate(args []string) error {
+func validate(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "--check-upstream" {
-		return validateUpstream(context.Background(), args[1:])
+		return validateUpstream(ctx, args[1:])
 	}
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -166,6 +175,7 @@ type proxyOptions struct {
 	config    string
 	transport string
 	url       string
+	timeout   time.Duration
 	headers   headerFlags
 	headerEnv headerEnvFlags
 }
@@ -200,6 +210,7 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	fs.StringVar(&opts.config, "config", "", "path to .mcp-filter.json (defaults to upward search)")
 	fs.StringVar(&opts.transport, "transport", "stdio", "upstream transport: stdio, streamable-http, or sse")
 	fs.StringVar(&opts.url, "url", "", "upstream HTTP endpoint")
+	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "maximum duration of one upstream tool call; 0 disables the limit")
 	fs.Var(&opts.headers, "header", "upstream HTTP header NAME=VALUE (repeatable)")
 	fs.Var(&opts.headerEnv, "header-env", "upstream HTTP header from environment HEADER=ENVIRONMENT_VARIABLE (repeatable)")
 	if err := fs.Parse(args); err != nil {
