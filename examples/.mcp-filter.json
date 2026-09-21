@@ -1,0 +1,20 @@
+{
+  "$schema": "../docs/config.schema.json",
+  "entries": {
+    "tracker": {
+      "allow": ["get_issue", "search_issues"],
+      "metadata": {
+        "server": {
+          "title": "Project tracker",
+          "instructions": "Use issue keys from this repository."
+        },
+        "tools": {
+          "get_issue": {
+            "description": "Read an issue before changing related code.",
+            "annotations": { "readOnlyHint": true }
+          }
+        }
+      }
+    }
+  }
+}

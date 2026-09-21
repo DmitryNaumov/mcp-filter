@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcp-filter.dev/schema/v1.json",
+  "title": "mcp-filter rules",
+  "type": "object",
+  "required": ["entries"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "entries": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "properties": {
+        "allow": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "server": { "type": "object" },
+            "tools": { "type": "object", "additionalProperties": { "type": "object" } },
+            "patches": { "type": "array" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

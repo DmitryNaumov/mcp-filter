@@ -39,6 +39,12 @@ func Load(dir string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return LoadPath(basePath)
+}
+
+// LoadPath loads an explicit base rules file and an optional local override
+// beside it. It is useful when the MCP client starts the proxy outside a repo.
+func LoadPath(basePath string) (Config, error) {
 	base, err := read(basePath)
 	if err != nil {
 		return Config{}, err

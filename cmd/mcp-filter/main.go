@@ -84,13 +84,14 @@ func validate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	entryName := fs.String("entry", "", "configured entry name")
+	configPath := fs.String("config", "", "path to .mcp-filter.json (defaults to upward search)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *entryName == "" {
 		return errors.New("--entry is required")
 	}
-	cfg, err := config.Load(".")
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return err
 	}
@@ -127,6 +128,7 @@ func inspect(ctx context.Context, args []string) error {
 
 type proxyOptions struct {
 	entry     string
+	config    string
 	transport string
 	url       string
 	headers   headerFlags
@@ -160,6 +162,7 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	fs.SetOutput(os.Stderr)
 	var opts proxyOptions
 	fs.StringVar(&opts.entry, "entry", "", "configured entry name")
+	fs.StringVar(&opts.config, "config", "", "path to .mcp-filter.json (defaults to upward search)")
 	fs.StringVar(&opts.transport, "transport", "stdio", "upstream transport: stdio, streamable-http, or sse")
 	fs.StringVar(&opts.url, "url", "", "upstream HTTP endpoint")
 	fs.Var(&opts.headers, "header", "upstream HTTP header NAME=VALUE (repeatable)")
@@ -186,7 +189,7 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 }
 
 func connect(ctx context.Context, opts proxyOptions, command []string) (config.Entry, *mcp.ClientSession, []*mcp.Tool, error) {
-	cfg, err := config.Load(".")
+	cfg, err := loadConfig(opts.config)
 	if err != nil {
 		return config.Entry{}, nil, nil, err
 	}
@@ -212,6 +215,13 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 		return config.Entry{}, nil, nil, fmt.Errorf("list upstream tools for %q: %w", opts.entry, err)
 	}
 	return entry, session, result.Tools, nil
+}
+
+func loadConfig(path string) (config.Config, error) {
+	if path != "" {
+		return config.LoadPath(path)
+	}
+	return config.Load(".")
 }
 
 func newTransport(opts proxyOptions, command []string) (mcp.Transport, error) {
