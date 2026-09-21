@@ -1,0 +1,23 @@
+# Copy these entries to ~/.codex/config.toml or a trusted project's
+# .codex/config.toml. The entry names must match .mcp-filter.json entries.
+
+[mcp_servers.tracker]
+command = "mcp-filter"
+args = [
+  "proxy",
+  "--entry", "tracker",
+  "--transport", "stdio",
+  "--",
+  "npx", "-y", "@acme/tracker-mcp"
+]
+
+[mcp_servers.remote-docs]
+command = "mcp-filter"
+args = [
+  "proxy",
+  "--entry", "remote-docs",
+  "--transport", "streamable-http",
+  "--url", "https://mcp.example.com/mcp",
+  "--header-env", "Authorization=REMOTE_DOCS_TOKEN"
+]
+env_vars = ["REMOTE_DOCS_TOKEN"]

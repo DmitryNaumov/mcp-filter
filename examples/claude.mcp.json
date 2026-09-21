@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "tracker": {
+      "command": "mcp-filter",
+      "args": [
+        "proxy",
+        "--entry", "tracker",
+        "--transport", "stdio",
+        "--",
+        "npx", "-y", "@acme/tracker-mcp"
+      ]
+    },
+    "remote-docs": {
+      "command": "mcp-filter",
+      "args": [
+        "proxy",
+        "--entry", "remote-docs",
+        "--transport", "streamable-http",
+        "--url", "https://mcp.example.com/mcp",
+        "--header-env", "Authorization=REMOTE_DOCS_TOKEN"
+      ],
+      "env": {
+        "REMOTE_DOCS_TOKEN": "Bearer replace-me"
+      }
+    }
+  }
+}
