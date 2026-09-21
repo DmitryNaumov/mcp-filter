@@ -1,0 +1,2 @@
+# Personal mcp-filter overrides, including local server registrations and secrets.
+.mcp-filter.local.json
