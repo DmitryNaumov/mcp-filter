@@ -81,6 +81,9 @@ func proxy(ctx context.Context, args []string) error {
 }
 
 func validate(args []string) error {
+	if len(args) > 0 && args[0] == "--check-upstream" {
+		return validateUpstream(context.Background(), args[1:])
+	}
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	entryName := fs.String("entry", "", "configured entry name")
@@ -103,6 +106,33 @@ func validate(args []string) error {
 		return fmt.Errorf("entry %q must declare allow explicitly", *entryName)
 	}
 	fmt.Fprintf(os.Stdout, "entry %q is valid (%d allowed tools)\n", *entryName, len(entry.Allow))
+	return nil
+}
+
+func validateUpstream(ctx context.Context, args []string) error {
+	opts, command, err := parseProxyFlags(args)
+	if err != nil {
+		return err
+	}
+	entry, session, tools, err := connect(ctx, opts, command)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	available := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		available[tool.Name] = struct{}{}
+	}
+	var missing []string
+	for _, allowed := range entry.Allow {
+		if _, ok := available[allowed]; !ok {
+			missing = append(missing, allowed)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("entry %q allowlist references unavailable upstream tools: %s", opts.entry, strings.Join(missing, ", "))
+	}
+	fmt.Fprintf(os.Stdout, "entry %q matches upstream (%d allowed tools)\n", opts.entry, len(entry.Allow))
 	return nil
 }
 

@@ -8,6 +8,8 @@
 
 Стартовый конфиг: [examples/.mcp-filter.json](examples/.mcp-filter.json). Для запуска вне корня проекта передайте явный путь: `mcp-filter proxy --config /path/.mcp-filter.json …`.
 
+Проверка без запуска upstream: `mcp-filter validate --entry tracker`. Для сверки allowlist с фактическим сервером: `mcp-filter validate --check-upstream --entry tracker --transport stdio -- npx -y @acme/tracker-mcp`.
+
 ## Целевой сценарий
 
 1. Нативные `.mcp.json` и `config.toml` по-прежнему регистрируют реальные MCP-серверы и содержат их команды, URL, аргументы и параметры подключения.

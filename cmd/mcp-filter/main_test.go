@@ -172,6 +172,35 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	}
 }
 
+func TestValidateUpstreamRejectsMissingAllowedTool(t *testing.T) {
+	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible","missing"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := validate([]string{
+		"--check-upstream", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("expected missing upstream tool error, got %v", err)
+	}
+}
+
+func TestValidateUpstreamAcceptsMatchingAllowlist(t *testing.T) {
+	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validate([]string{
+		"--check-upstream", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMCPFilterHelperProcess(t *testing.T) {
 	if os.Getenv("MCP_FILTER_TEST_HELPER") != "1" {
 		return
