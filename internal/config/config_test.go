@@ -1,14 +1,30 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestReadRejectsRetiredEntriesField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), BaseFile)
+	if err := os.WriteFile(path, []byte(`{"entries":{"tracker":{"allow":["get"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := read(path)
+	if err == nil || !strings.Contains(err.Error(), "mcpServers") {
+		t.Fatalf("expected mcpServers migration error, got %v", err)
+	}
+}
 
 func TestMergeLocalReplacesAllowButRetainsToolMetadata(t *testing.T) {
-	base := Config{Entries: map[string]Entry{"tracker": {
+	base := Config{MCPServers: map[string]Entry{"tracker": {
 		Allow:    []string{"get", "search"},
 		Metadata: Metadata{Tools: map[string]map[string]any{"search": {"description": "search issues"}}},
 	}}}
-	local := Config{Entries: map[string]Entry{"tracker": {Allow: []string{"get"}}}}
-	got := merge(base, local).Entries["tracker"]
+	local := Config{MCPServers: map[string]Entry{"tracker": {Allow: []string{"get"}}}}
+	got := merge(base, local).MCPServers["tracker"]
 	if got.Allowed("search") || !got.Allowed("get") {
 		t.Fatalf("allowlist was not replaced: %#v", got.Allow)
 	}

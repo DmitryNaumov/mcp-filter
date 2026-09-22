@@ -14,7 +14,8 @@ const (
 )
 
 type Config struct {
-	Entries map[string]Entry `json:"entries"`
+	Schema     string           `json:"$schema"`
+	MCPServers map[string]Entry `json:"mcpServers"`
 }
 
 type Entry struct {
@@ -88,8 +89,15 @@ func read(path string) (Config, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if cfg.Entries == nil {
-		cfg.Entries = map[string]Entry{}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if _, legacy := fields["entries"]; legacy {
+		return Config{}, fmt.Errorf("parse %s: use %q instead of the retired %q field", path, "mcpServers", "entries")
+	}
+	if cfg.MCPServers == nil {
+		cfg.MCPServers = map[string]Entry{}
 	}
 	return cfg, nil
 }
@@ -103,12 +111,12 @@ func readOptional(path string) (Config, error) {
 }
 
 func merge(base, local Config) Config {
-	result := Config{Entries: make(map[string]Entry, len(base.Entries)+len(local.Entries))}
-	for name, entry := range base.Entries {
-		result.Entries[name] = entry
+	result := Config{MCPServers: make(map[string]Entry, len(base.MCPServers)+len(local.MCPServers))}
+	for name, entry := range base.MCPServers {
+		result.MCPServers[name] = entry
 	}
-	for name, override := range local.Entries {
-		current := result.Entries[name]
+	for name, override := range local.MCPServers {
+		current := result.MCPServers[name]
 		if override.Allow != nil {
 			current.Allow = override.Allow
 		}
@@ -117,7 +125,7 @@ func merge(base, local Config) Config {
 		if override.Metadata.Patches != nil {
 			current.Metadata.Patches = override.Metadata.Patches
 		}
-		result.Entries[name] = current
+		result.MCPServers[name] = current
 	}
 	return result
 }
@@ -174,7 +182,7 @@ func (c Config) Entry(name string) (Entry, error) {
 // allowlist: callers use the former for transparent pass-through and reject the
 // latter as an unsafe, incomplete filter rule.
 func (c Config) Lookup(name string) (Entry, bool) {
-	entry, ok := c.Entries[name]
+	entry, ok := c.MCPServers[name]
 	return entry, ok
 }
 

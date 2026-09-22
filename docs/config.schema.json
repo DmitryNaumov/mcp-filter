@@ -3,10 +3,10 @@
   "$id": "https://mcp-filter.dev/schema/v1.json",
   "title": "mcp-filter rules",
   "type": "object",
-  "required": ["entries"],
+  "required": ["mcpServers"],
   "properties": {
     "$schema": { "type": "string" },
-    "entries": {
+    "mcpServers": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/entry" }
     }

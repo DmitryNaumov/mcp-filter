@@ -1,5 +1,5 @@
 # Copy these entries to ~/.codex/config.toml or a trusted project's
-# .codex/config.toml. The entry names must match .mcp-filter.json entries.
+# .codex/config.toml. The entry names must match .mcp-filter.json mcpServers keys.
 
 [mcp_servers.tracker]
 command = "mcp-filter"

@@ -251,7 +251,7 @@ func TestConnectAutoDoesNotFallbackOnAuthenticationFailure(t *testing.T) {
 	}))
 	defer upstream.Close()
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -280,7 +280,7 @@ func TestConnectAutoDoesNotFallbackOnAuthenticationFailure(t *testing.T) {
 
 func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"],"metadata":{"patches":[{"method":"tools/list","select":{"name":"visible"},"patch":{"title":"Visible issue"}},{"method":"prompts/list","select":{"name":"status"},"patch":{"title":"Project status"}},{"method":"resources/list","select":{"uri":"test://item"},"patch":{"title":"Project resource"}}]}}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"test":{"allow":["visible"],"metadata":{"patches":[{"method":"tools/list","select":{"name":"visible"},"patch":{"title":"Visible issue"}},{"method":"prompts/list","select":{"name":"status"},"patch":{"title":"Project status"}},{"method":"resources/list","select":{"uri":"test://item"},"patch":{"title":"Project resource"}}]}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -348,7 +348,7 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 
 func TestProxyTimesOutUpstreamToolCall(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["slow"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"test":{"allow":["slow"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	proxyCommand := exec.Command(
@@ -373,7 +373,7 @@ func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
 	writeRules := func(allow string) {
 		t.Helper()
-		contents := []byte(`{"entries":{"test":{"allow":["` + allow + `"]}}}`)
+		contents := []byte(`{"mcpServers":{"test":{"allow":["` + allow + `"]}}}`)
 		if err := os.WriteFile(configPath, contents, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -419,7 +419,7 @@ func TestProxyPassesThroughMissingEntryAndReloadsWhenItAppears(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeRules(`{"entries":{}}`)
+	writeRules(`{"mcpServers":{}}`)
 	proxyCommand := exec.Command(
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
 		"test", "--config", configPath, "--",
@@ -436,14 +436,14 @@ func TestProxyPassesThroughMissingEntryAndReloadsWhenItAppears(t *testing.T) {
 	waitForToolNames(t, ctx, session, []string{"hidden", "slow", "visible"})
 
 	time.Sleep(150 * time.Millisecond)
-	writeRules(`{"entries":{"test":{"allow":["visible"],"metadata":{"tools":{"visible":{"title":"Only this tool"}}}}}}`)
+	writeRules(`{"mcpServers":{"test":{"allow":["visible"],"metadata":{"tools":{"visible":{"title":"Only this tool"}}}}}}`)
 	waitForToolNames(t, ctx, session, []string{"visible"})
 	tools, err := session.ListTools(ctx, nil)
 	if err != nil || tools.Tools[0].Title != "Only this tool" {
 		t.Fatalf("entry metadata was not applied: %#v, %v", tools, err)
 	}
 
-	writeRules(`{"entries":{}}`)
+	writeRules(`{"mcpServers":{}}`)
 	waitForToolNames(t, ctx, session, []string{"hidden", "slow", "visible"})
 }
 
@@ -451,7 +451,7 @@ func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mcp-filter.json")
 	localPath := filepath.Join(dir, ".mcp-filter.local.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	proxyCommand := exec.Command(
@@ -473,7 +473,7 @@ func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
 
 	// Give the proxy time to subscribe before exercising create and remove events.
 	time.Sleep(150 * time.Millisecond)
-	if err := os.WriteFile(localPath, []byte(`{"entries":{"test":{"allow":["hidden"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(localPath, []byte(`{"mcpServers":{"test":{"allow":["hidden"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	waitForToolNames(t, ctx, session, []string{"hidden"})
@@ -520,7 +520,7 @@ func waitForToolNames(t *testing.T, ctx context.Context, session *mcp.ClientSess
 func TestValidateUpstreamRejectsMissingAllowedTool(t *testing.T) {
 	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible","missing"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"test":{"allow":["visible","missing"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	err := validate(context.Background(), []string{
@@ -535,7 +535,7 @@ func TestValidateUpstreamRejectsMissingAllowedTool(t *testing.T) {
 func TestValidateUpstreamAcceptsMatchingAllowlist(t *testing.T) {
 	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := validate(context.Background(), []string{
@@ -611,7 +611,7 @@ func runE2EUpstream(ctx context.Context) error {
 func connectRemoteForTest(t *testing.T, transport, endpoint string) []*mcp.Tool {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
-	contents := []byte(`{"entries":{"test":{"allow":["visible"]}}}`)
+	contents := []byte(`{"mcpServers":{"test":{"allow":["visible"]}}}`)
 	if err := os.WriteFile(configPath, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,6 @@
 {
   "$schema": "../docs/config.schema.json",
-  "entries": {
+  "mcpServers": {
     "tracker": {
       "allow": ["get_issue", "search_issues"],
       "metadata": {

@@ -18,7 +18,7 @@ Prompts, resources и resource templates передаются без фильт�
 
 Прокси всегда объявляет capability `listChanged` для tools, prompts и resources. Изменения `.mcp-filter.json` или `.mcp-filter.local.json` отслеживаются во время работы: allowlist и metadata tools перезагружаются с debounce, а подключённым клиентам отправляется `notifications/tools/list_changed`. Некорректная редакция не заменяет уже работающие правила. Если entry отсутствует в обоих rules-файлах, сервер работает прозрачным pass-through; добавление entry начинает фильтрацию без перезапуска, удаление возвращает pass-through.
 
-Готовые обёртки: [Claude `.mcp.json`](examples/claude.mcp.json) и [Codex `config.toml`](examples/codex.config.toml). Имя entry обычно совпадает с ключом `entries` в rules-конфиге; отсутствующий ключ намеренно означает pass-through.
+Готовые обёртки: [Claude `.mcp.json`](examples/claude.mcp.json) и [Codex `config.toml`](examples/codex.config.toml). Имя entry обычно совпадает с ключом `mcpServers` в rules-конфиге; отсутствующий ключ намеренно означает pass-through.
 
 Для HTTP URL transport по умолчанию — `auto`: сначала используется Streamable HTTP, а legacy SSE выбирается только после подтверждения legacy SSE handshake. Укажите `--transport streamable-http` или `--transport sse`, чтобы жёстко выбрать протокол. Для команды после `--` по-прежнему используется stdio.
 
