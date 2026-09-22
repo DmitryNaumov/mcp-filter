@@ -6,6 +6,15 @@
   "required": ["mcpServers"],
   "properties": {
     "$schema": { "type": "string" },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "directory": { "type": "string", "minLength": 1 },
+        "level": { "enum": ["error", "warn", "info", "debug"] },
+        "format": { "enum": ["text", "json"] }
+      },
+      "additionalProperties": false
+    },
     "mcpServers": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/entry" }

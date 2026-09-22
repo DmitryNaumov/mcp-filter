@@ -16,6 +16,23 @@ Prompts, resources и resource templates передаются без фильт�
 
 По умолчанию вызов upstream-инструмента ограничен 120 секундами. Измените предел флагом `--timeout 30s`; `--timeout 0` отключает ограничение.
 
+## Логи
+
+Логи настраиваются один раз для всех proxy в `.mcp-filter.json`; в `.mcp-filter.local.json` можно переопределить отдельные поля. У каждого MCP entry — свой append-only файл в указанной папке. Ротация пока намеренно не выполняется.
+
+```json
+{
+  "logging": {
+    "directory": ".mcp-filter/logs",
+    "level": "info",
+    "format": "json"
+  },
+  "mcpServers": {}
+}
+```
+
+`directory` разрешается относительно каталога rules-файла. Поддерживаются уровни `error`, `warn`, `info`, `debug` и форматы `text`, `json`; по умолчанию — `warn` и `text`. Если раздел `logging` отсутствует, предупреждения и ошибки остаются в `stderr`, а файлов не создаётся. В логи не попадают аргументы и результаты вызовов, HTTP-заголовки и значения окружения.
+
 Прокси всегда объявляет capability `listChanged` для tools, prompts и resources. Изменения `.mcp-filter.json` или `.mcp-filter.local.json` отслеживаются во время работы: allowlist и metadata tools перезагружаются с debounce, а подключённым клиентам отправляется `notifications/tools/list_changed`. Некорректная редакция не заменяет уже работающие правила. Если entry отсутствует в обоих rules-файлах, сервер работает прозрачным pass-through; добавление entry начинает фильтрацию без перезапуска, удаление возвращает pass-through.
 
 Готовые обёртки: [Claude `.mcp.json`](examples/claude.mcp.json) и [Codex `config.toml`](examples/codex.config.toml). Имя entry обычно совпадает с ключом `mcpServers` в rules-конфиге; отсутствующий ключ намеренно означает pass-through.

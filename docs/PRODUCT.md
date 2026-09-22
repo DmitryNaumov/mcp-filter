@@ -114,7 +114,8 @@ Codex / Claude config
 
 ## Требования безопасности и качества
 
-- stdout — только MCP JSON-RPC; логи и upstream stderr — в stderr;
+- stdout — только MCP JSON-RPC; без `logging` логи фильтра пишутся в stderr, upstream stderr остаётся в stderr;
+- файловые логи задаются общим `logging` в `.mcp-filter.json` и пишутся отдельно для каждого entry; ротация будет добавлена отдельным инкрементом с lock-файлом;
 - секреты, URL credentials и значения заголовков не журналируются и не выводятся в `inspect`;
 - неизвестный или запрещённый инструмент не вызывается;
 - upstream, entry и transport включаются в ошибку, но без секретов;

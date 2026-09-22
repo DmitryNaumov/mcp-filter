@@ -70,11 +70,21 @@ func proxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, configured, session, tools, err := connect(ctx, opts, command)
+	cfg, err := config.LoadPath(configPath)
+	if err != nil {
+		return err
+	}
+	closeLogger, err := configureLogger(cfg, configPath, opts.entry)
+	if err != nil {
+		return err
+	}
+	defer closeLogger()
+	entry, configured, session, tools, err := connectWithConfig(ctx, opts, command, cfg)
 	if err != nil {
 		return err
 	}
 	defer session.Close()
+	slog.Info("connected upstream", "transport", opts.transport, "configured", configured, "tool_count", len(tools))
 
 	implementation, instructions, err := overlayServer(opts.entry, session, entry.Metadata.Server)
 	if err != nil {
@@ -287,6 +297,10 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 	if err != nil {
 		return config.Entry{}, false, nil, nil, err
 	}
+	return connectWithConfig(ctx, opts, command, cfg)
+}
+
+func connectWithConfig(ctx context.Context, opts proxyOptions, command []string, cfg config.Config) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
 	entry, configured := cfg.Lookup(opts.entry)
 	if configured && entry.Allow == nil {
 		return config.Entry{}, false, nil, nil, fmt.Errorf("entry %q must declare allow explicitly", opts.entry)

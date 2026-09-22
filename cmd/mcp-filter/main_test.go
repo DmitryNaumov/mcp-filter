@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,6 +215,41 @@ func TestParseProxyFlagsUsesConfiguredToolTimeout(t *testing.T) {
 	}
 	if opts.timeout != 3*time.Second {
 		t.Fatalf("unexpected timeout: %s", opts.timeout)
+	}
+}
+
+func TestConfigureLoggerWritesOneSafeFilePerEntry(t *testing.T) {
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	directory := "logs"
+	level := "info"
+	format := "json"
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	closeLogger, err := configureLogger(config.Config{Logging: &config.Logging{
+		Directory: &directory,
+		Level:     &level,
+		Format:    &format,
+	}}, configPath, "tracker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slog.Info("connected upstream")
+	if err := closeLogger(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(filepath.Dir(configPath), "logs", "tracker.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), `"msg":"connected upstream"`) || !strings.Contains(string(contents), `"entry":"tracker"`) {
+		t.Fatalf("unexpected log content: %s", contents)
+	}
+}
+
+func TestEntryLogFileNameDoesNotInterpretEntryAsPath(t *testing.T) {
+	name := entryLogFileName("../../private")
+	if strings.ContainsAny(name, `/\\`) || !strings.HasSuffix(name, ".log") {
+		t.Fatalf("unsafe log filename %q", name)
 	}
 }
 

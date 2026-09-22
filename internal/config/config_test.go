@@ -33,6 +33,26 @@ func TestMergeLocalReplacesAllowButRetainsToolMetadata(t *testing.T) {
 	}
 }
 
+func TestMergeLocalOverridesOnlySpecifiedLoggingFields(t *testing.T) {
+	baseDirectory, baseLevel, localLevel := "logs", "warn", "debug"
+	base := Config{Logging: &Logging{Directory: &baseDirectory, Level: &baseLevel}}
+	local := Config{Logging: &Logging{Level: &localLevel}}
+	got := merge(base, local).Logging
+	if got == nil || got.Directory == nil || *got.Directory != "logs" || got.Level == nil || *got.Level != "debug" {
+		t.Fatalf("unexpected merged logging settings: %#v", got)
+	}
+}
+
+func TestLoadPathRejectsIncompleteLoggingConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), BaseFile)
+	if err := os.WriteFile(path, []byte(`{"logging":{"level":"debug"},"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPath(path); err == nil || !strings.Contains(err.Error(), "logging.directory") {
+		t.Fatalf("expected logging directory error, got %v", err)
+	}
+}
+
 func TestMergePatchDeletesAndMerges(t *testing.T) {
 	got := MergePatch(map[string]any{"title": "old", "annotations": map[string]any{"readOnlyHint": true}}, map[string]any{"title": nil, "annotations": map[string]any{"destructiveHint": false}})
 	if _, ok := got["title"]; ok {

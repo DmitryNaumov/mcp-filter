@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -15,7 +16,20 @@ const (
 
 type Config struct {
 	Schema     string           `json:"$schema"`
+	Logging    *Logging         `json:"logging"`
 	MCPServers map[string]Entry `json:"mcpServers"`
+}
+
+// Logging configures diagnostics produced by mcp-filter itself. It deliberately
+// contains no request or response logging options: tool arguments, results,
+// headers and other secret-bearing values are never logged.
+//
+// Pointers preserve the distinction between an omitted local override and an
+// explicitly supplied value while base and local configurations are merged.
+type Logging struct {
+	Directory *string `json:"directory"`
+	Level     *string `json:"level"`
+	Format    *string `json:"format"`
 }
 
 type Entry struct {
@@ -59,7 +73,38 @@ func LoadPath(basePath string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return merge(base, local), nil
+	result := merge(base, local)
+	if err := result.ValidateLogging(); err != nil {
+		return Config{}, err
+	}
+	return result, nil
+}
+
+// ValidateLogging validates the effective (base plus local) logging settings.
+// It is intentionally performed after merging, so a local file may override
+// only the log level or format while inheriting the base directory.
+func (c Config) ValidateLogging() error {
+	if c.Logging == nil {
+		return nil
+	}
+	if c.Logging.Directory == nil || strings.TrimSpace(*c.Logging.Directory) == "" {
+		return errors.New("logging.directory is required when logging is configured")
+	}
+	if c.Logging.Level != nil {
+		switch *c.Logging.Level {
+		case "", "error", "warn", "info", "debug":
+		default:
+			return fmt.Errorf("unsupported logging.level %q", *c.Logging.Level)
+		}
+	}
+	if c.Logging.Format != nil {
+		switch *c.Logging.Format {
+		case "", "text", "json":
+		default:
+			return fmt.Errorf("unsupported logging.format %q", *c.Logging.Format)
+		}
+	}
+	return nil
 }
 
 func findUp(dir, name string) (string, error) {
@@ -111,7 +156,7 @@ func readOptional(path string) (Config, error) {
 }
 
 func merge(base, local Config) Config {
-	result := Config{MCPServers: make(map[string]Entry, len(base.MCPServers)+len(local.MCPServers))}
+	result := Config{Logging: mergeLogging(base.Logging, local.Logging), MCPServers: make(map[string]Entry, len(base.MCPServers)+len(local.MCPServers))}
 	for name, entry := range base.MCPServers {
 		result.MCPServers[name] = entry
 	}
@@ -126,6 +171,28 @@ func merge(base, local Config) Config {
 			current.Metadata.Patches = override.Metadata.Patches
 		}
 		result.MCPServers[name] = current
+	}
+	return result
+}
+
+func mergeLogging(base, local *Logging) *Logging {
+	if base == nil && local == nil {
+		return nil
+	}
+	result := &Logging{}
+	if base != nil {
+		*result = *base
+	}
+	if local != nil {
+		if local.Directory != nil {
+			result.Directory = local.Directory
+		}
+		if local.Level != nil {
+			result.Level = local.Level
+		}
+		if local.Format != nil {
+			result.Format = local.Format
+		}
 	}
 	return result
 }
