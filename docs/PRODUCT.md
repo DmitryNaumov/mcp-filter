@@ -26,7 +26,7 @@ Codex / Claude config
 
 Прокси при старте подключается к upstream, получает его `tools/list`, накладывает rules для `entry` и публикует только разрешённые записи. Исходные имена инструментов сохраняются. `tools/call` с разрешённым именем передаётся upstream с исходными аргументами; результат, ошибка инструмента и все значения вызова передаются без изменения.
 
-В MVP поддерживаются upstream-транспорты stdio, Streamable HTTP и legacy SSE. Внешний транспорт всегда stdio, поэтому remote entry клиента меняется с `url` на `command = "mcp-filter"`: исходный URL и его transport-опции становятся аргументами этого process в том же клиентском конфиге. Это технически необходимо, чтобы локальный процесс мог быть посредником; URL не перемещается в filter-config.
+В MVP поддерживаются upstream-транспорты stdio, Streamable HTTP и legacy SSE. Внешний транспорт всегда stdio, поэтому remote entry клиента меняется с `url` на `command = "mcp-filter"`: исходный URL и его transport-опции становятся аргументами этого process в том же клиентском конфиге. Это технически необходимо, чтобы локальный процесс мог быть посредником; URL не перемещается в filter-config. При `--url` без `--transport` выбирается `auto`: сначала Streamable HTTP, затем SSE только после успешного подтверждения legacy SSE handshake; ошибки аутентификации, DNS/сети и 5xx не запускают fallback. Явные `streamable-http` и `sse` сохраняют приоритет.
 
 ## Границы MVP
 
@@ -34,7 +34,7 @@ Codex / Claude config
 
 - stdio-прокси для MCP-клиентов;
 - stdio, Streamable HTTP и legacy SSE upstream;
-- точный allowlist по имени инструмента; отсутствие `allow` означает публикацию нуля инструментов;
+- точный allowlist по имени инструмента; отсутствие `allow` у присутствующего entry означает ошибку, а отсутствующий entry работает прозрачным pass-through;
 - `.mcp-filter.json` + `.mcp-filter.local.json`, где local игнорируется Git;
 - независимые overlays метаданных сервера и инструментов;
 - `validate`, `inspect`, stderr-логи и безопасные ошибки;
@@ -88,7 +88,7 @@ Codex / Claude config
 
 ## Обёртки в конфигурации клиентов
 
-Имя `entry` должно совпадать с именем сервера в config клиента.
+Имя `entry` обычно совпадает с именем сервера в config клиента. Если ключ отсутствует в обоих rules-файлах, proxy остаётся прозрачным pass-through; это позволяет сначала подключить сервер, а правила добавить позднее.
 
 ### stdio upstream
 
@@ -111,7 +111,7 @@ Codex / Claude config
 
 Было: `url = "https://mcp.example.com/mcp"`.
 
-Станет: stdio entry с `command = "mcp-filter"` и аргументами `example --transport streamable-http --url https://mcp.example.com/mcp`; legacy SSE использует `--transport sse`. Заголовки и источники токенов остаются явными параметрами этого entry, например `--header-env AUTHORIZATION`; в filter-config они не попадают. Реальный синтаксис Codex/Claude примеров фиксируется и тестируется на этапе интеграции.
+Станет: stdio entry с `command = "mcp-filter"` и аргументами `example --url https://mcp.example.com/mcp`; `auto` выберет Streamable HTTP, а подтверждённый legacy SSE — автоматически. При необходимости жёстко зафиксировать transport используйте `--transport streamable-http` или `--transport sse`. Заголовки и источники токенов остаются явными параметрами этого entry, например `--header-env AUTHORIZATION`; в filter-config они не попадают. Реальный синтаксис Codex/Claude примеров фиксируется и тестируется на этапе интеграции.
 
 ## Требования безопасности и качества
 

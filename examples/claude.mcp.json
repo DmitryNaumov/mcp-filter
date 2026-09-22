@@ -12,7 +12,6 @@
       "command": "mcp-filter",
       "args": [
         "remote-docs",
-        "--transport", "streamable-http",
         "--url", "https://mcp.example.com/mcp",
         "--header-env", "Authorization=REMOTE_DOCS_TOKEN"
       ],

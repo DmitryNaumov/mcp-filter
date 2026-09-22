@@ -162,11 +162,20 @@ func MergePatch(target, patch map[string]any) map[string]any {
 }
 
 func (c Config) Entry(name string) (Entry, error) {
-	entry, ok := c.Entries[name]
+	entry, ok := c.Lookup(name)
 	if !ok {
 		return Entry{}, fmt.Errorf("entry %q not configured", name)
 	}
 	return entry, nil
+}
+
+// Lookup returns an entry only when it was explicitly present in either rules
+// file. An absent entry is deliberately different from a present entry with no
+// allowlist: callers use the former for transparent pass-through and reject the
+// latter as an unsafe, incomplete filter rule.
+func (c Config) Lookup(name string) (Entry, bool) {
+	entry, ok := c.Entries[name]
+	return entry, ok
 }
 
 func (e Entry) Allowed(name string) bool {

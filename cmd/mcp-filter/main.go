@@ -56,7 +56,7 @@ func proxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, session, tools, err := connect(ctx, opts, command)
+	entry, configured, session, tools, err := connect(ctx, opts, command)
 	if err != nil {
 		return err
 	}
@@ -78,13 +78,13 @@ func proxy(ctx context.Context, args []string) error {
 	if err := attachPassthroughPrimitives(ctx, server, session, entry); err != nil {
 		return err
 	}
-	filteredTools, err := prepareAllowedTools(tools, entry)
+	filteredTools, err := prepareAllowedTools(tools, entry, configured)
 	if err != nil {
 		return err
 	}
 	addTools(server, session, filteredTools, opts.timeout)
-	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry) error {
-		filteredTools, err := prepareAllowedTools(tools, updated)
+	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry, configured bool) error {
+		filteredTools, err := prepareAllowedTools(tools, updated, configured)
 		if err != nil {
 			return err
 		}
@@ -129,7 +129,7 @@ func validateUpstream(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, session, tools, err := connect(ctx, opts, command)
+	entry, configured, session, tools, err := connect(ctx, opts, command)
 	if err != nil {
 		return err
 	}
@@ -139,6 +139,9 @@ func validateUpstream(ctx context.Context, args []string) error {
 		available[tool.Name] = struct{}{}
 	}
 	var missing []string
+	if !configured {
+		return fmt.Errorf("entry %q not configured", opts.entry)
+	}
 	for _, allowed := range entry.Allow {
 		if _, ok := available[allowed]; !ok {
 			missing = append(missing, allowed)
@@ -156,14 +159,14 @@ func inspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, session, tools, err := connect(ctx, opts, command)
+	entry, configured, session, tools, err := connect(ctx, opts, command)
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 	for _, tool := range tools {
 		status := "hidden"
-		if entry.Allowed(tool.Name) {
+		if !configured || entry.Allowed(tool.Name) {
 			status = "published"
 		}
 		fmt.Fprintf(os.Stdout, "%s\t%s\n", status, tool.Name)
@@ -214,7 +217,7 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	var opts proxyOptions
 	fs.StringVar(&opts.entry, "entry", "", "configured entry name")
 	fs.StringVar(&opts.config, "config", "", "path to .mcp-filter.json (defaults to upward search)")
-	fs.StringVar(&opts.transport, "transport", "stdio", "upstream transport: stdio, streamable-http, or sse")
+	fs.StringVar(&opts.transport, "transport", "", "upstream transport: stdio, auto, streamable-http, or sse")
 	fs.StringVar(&opts.url, "url", "", "upstream HTTP endpoint")
 	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "maximum duration of one upstream tool call; 0 disables the limit")
 	fs.Var(&opts.headers, "header", "upstream HTTP header NAME=VALUE (repeatable)")
@@ -231,12 +234,19 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	if opts.entry == "" {
 		return proxyOptions{}, nil, errors.New("entry name is required as the first argument or --entry")
 	}
+	if opts.transport == "" {
+		if opts.url != "" {
+			opts.transport = "auto"
+		} else {
+			opts.transport = "stdio"
+		}
+	}
 	switch opts.transport {
 	case "stdio":
 		if len(fs.Args()) == 0 {
 			return proxyOptions{}, nil, errors.New("stdio requires an upstream command after --")
 		}
-	case "streamable-http", "sse":
+	case "auto", "streamable-http", "sse":
 		if opts.url == "" {
 			return proxyOptions{}, nil, fmt.Errorf("%s requires --url", opts.transport)
 		}
@@ -246,35 +256,58 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	return opts, fs.Args(), nil
 }
 
-func connect(ctx context.Context, opts proxyOptions, command []string) (config.Entry, *mcp.ClientSession, []*mcp.Tool, error) {
+func connect(ctx context.Context, opts proxyOptions, command []string) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
 	cfg, err := loadConfig(opts.config)
 	if err != nil {
-		return config.Entry{}, nil, nil, err
+		return config.Entry{}, false, nil, nil, err
 	}
-	entry, err := cfg.Entry(opts.entry)
-	if err != nil {
-		return config.Entry{}, nil, nil, err
-	}
-	if entry.Allow == nil {
-		return config.Entry{}, nil, nil, fmt.Errorf("entry %q must declare allow explicitly", opts.entry)
+	entry, configured := cfg.Lookup(opts.entry)
+	if configured && entry.Allow == nil {
+		return config.Entry{}, false, nil, nil, fmt.Errorf("entry %q must declare allow explicitly", opts.entry)
 	}
 	client := newUpstreamClient(func(kind string) {
 		slog.Default().Info("upstream MCP list changed; upstream refresh is pending implementation", "entry", opts.entry, "kind", kind)
 	})
 	transport, err := newTransport(opts, command)
 	if err != nil {
-		return config.Entry{}, nil, nil, err
+		return config.Entry{}, false, nil, nil, err
 	}
+	session, tools, err := connectTools(ctx, client, transport)
+	if err != nil && opts.transport == "auto" && isProtocolIncompatibility(err) && isLegacySSEEndpoint(ctx, opts) {
+		session, tools, err = connectTools(ctx, client, &mcp.SSEClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)})
+	}
+	if err != nil {
+		return config.Entry{}, false, nil, nil, fmt.Errorf("connect upstream %q: %w", opts.entry, err)
+	}
+	return entry, configured, session, tools, nil
+}
+
+func isProtocolIncompatibility(err error) bool {
+	// The SDK includes the HTTP status text in errors returned while sending
+	// initialize. Only statuses that commonly express a transport mismatch are
+	// candidates; the legacy handshake below must still positively verify SSE.
+	message := err.Error()
+	for _, status := range []string{
+		"Bad Request", "Not Found", "Method Not Allowed", "Not Acceptable", "Unsupported Media Type",
+	} {
+		if strings.Contains(message, status) {
+			return true
+		}
+	}
+	return false
+}
+
+func connectTools(ctx context.Context, client *mcp.Client, transport mcp.Transport) (*mcp.ClientSession, []*mcp.Tool, error) {
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return config.Entry{}, nil, nil, fmt.Errorf("connect upstream %q: %w", opts.entry, err)
+		return nil, nil, err
 	}
 	result, err := session.ListTools(ctx, nil)
 	if err != nil {
 		session.Close()
-		return config.Entry{}, nil, nil, fmt.Errorf("list upstream tools for %q: %w", opts.entry, err)
+		return nil, nil, err
 	}
-	return entry, session, result.Tools, nil
+	return session, result.Tools, nil
 }
 
 func newUpstreamClient(onChange func(kind string)) *mcp.Client {
@@ -311,10 +344,14 @@ func resolveConfigPath(path string) (string, error) {
 	return config.ResolvePath(".")
 }
 
-func prepareAllowedTools(tools []*mcp.Tool, entry config.Entry) ([]*mcp.Tool, error) {
+func prepareAllowedTools(tools []*mcp.Tool, entry config.Entry, configured bool) ([]*mcp.Tool, error) {
 	filtered := make([]*mcp.Tool, 0, len(tools))
 	for _, upstreamTool := range tools {
-		if !entry.Allowed(upstreamTool.Name) {
+		if configured && !entry.Allowed(upstreamTool.Name) {
+			continue
+		}
+		if !configured {
+			filtered = append(filtered, upstreamTool)
 			continue
 		}
 		patch, err := toolMetadataPatch(entry, upstreamTool)
@@ -358,7 +395,7 @@ func toolNames(tools []*mcp.Tool) []string {
 	return names
 }
 
-func watchRules(ctx context.Context, basePath, entryName string, apply func(config.Entry) error) {
+func watchRules(ctx context.Context, basePath, entryName string, apply func(config.Entry, bool) error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Default().Error("start rules watcher", "error", err)
@@ -408,16 +445,12 @@ func watchRules(ctx context.Context, basePath, entryName string, apply func(conf
 				slog.Default().Error("reload rules", "path", basePath, "error", err)
 				continue
 			}
-			entry, err := cfg.Entry(entryName)
-			if err != nil {
-				slog.Default().Error("reload rules entry", "entry", entryName, "error", err)
-				continue
-			}
-			if entry.Allow == nil {
+			entry, configured := cfg.Lookup(entryName)
+			if configured && entry.Allow == nil {
 				slog.Default().Error("reload rules entry has no allowlist", "entry", entryName)
 				continue
 			}
-			if err := apply(entry); err != nil {
+			if err := apply(entry, configured); err != nil {
 				slog.Default().Error("apply reloaded rules", "entry", entryName, "error", err)
 				continue
 			}
@@ -434,11 +467,41 @@ func newTransport(opts proxyOptions, command []string) (mcp.Transport, error) {
 		return &mcp.CommandTransport{Command: cmd}, nil
 	case "streamable-http":
 		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
+	case "auto":
+		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
 	case "sse":
 		return &mcp.SSEClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported transport %q", opts.transport)
 	}
+}
+
+// isLegacySSEEndpoint verifies the old SSE handshake before auto mode falls
+// back. It prevents a failed streamable request caused by authentication,
+// DNS, timeouts, or an ordinary server error from silently trying another
+// protocol. The probe's temporary session is closed immediately.
+func isLegacySSEEndpoint(ctx context.Context, opts proxyOptions) bool {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.url, nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("Accept", "text/event-stream")
+	response, err := httpClient(opts.headers, opts.headerEnv).Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+		return false
+	}
+	// The legacy protocol starts with an endpoint event. Read only enough of
+	// the response to identify it; do not treat a generic SSE stream as MCP.
+	buf := make([]byte, 4096)
+	n, err := response.Body.Read(buf)
+	if err != nil && n == 0 {
+		return false
+	}
+	return strings.Contains(string(buf[:n]), "event: endpoint")
 }
 
 func httpClient(headers headerFlags, headerEnv headerEnvFlags) *http.Client {

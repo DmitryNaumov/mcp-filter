@@ -180,6 +180,16 @@ func TestParseProxyFlagsAcceptsPositionalEntry(t *testing.T) {
 	}
 }
 
+func TestParseProxyFlagsSelectsAutoForURL(t *testing.T) {
+	opts, command, err := parseProxyFlags([]string{"tracker", "--url", "https://mcp.example.test/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.transport != "auto" || len(command) != 0 {
+		t.Fatalf("unexpected options: %#v %#v", opts, command)
+	}
+}
+
 func TestParseProxyFlagsRejectsConflictingEntries(t *testing.T) {
 	_, _, err := parseProxyFlags([]string{"tracker", "--entry", "docs", "--", "fake-mcp"})
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
@@ -216,6 +226,55 @@ func TestConnectLegacySSEUpstream(t *testing.T) {
 	tools := connectRemoteForTest(t, "sse", httpServer.URL)
 	if len(tools) != 1 || tools[0].Name != "visible" {
 		t.Fatalf("unexpected tools: %#v", tools)
+	}
+}
+
+func TestConnectAutoDetectsStreamableHTTPAndLegacySSE(t *testing.T) {
+	streamable := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return testUpstream() }, nil))
+	defer streamable.Close()
+	if tools := connectRemoteForTest(t, "auto", streamable.URL); len(tools) != 1 || tools[0].Name != "visible" {
+		t.Fatalf("unexpected streamable tools: %#v", tools)
+	}
+
+	legacy := httptest.NewServer(mcp.NewSSEHandler(func(*http.Request) *mcp.Server { return testUpstream() }, nil))
+	defer legacy.Close()
+	if tools := connectRemoteForTest(t, "auto", legacy.URL); len(tools) != 1 || tools[0].Name != "visible" {
+		t.Fatalf("unexpected legacy tools: %#v", tools)
+	}
+}
+
+func TestConnectAutoDoesNotFallbackOnAuthenticationFailure(t *testing.T) {
+	requests := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"entries":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, session, _, err := connect(ctx, proxyOptions{entry: "test", config: configPath, transport: "auto", url: upstream.URL}, nil)
+	if session != nil || err == nil {
+		t.Fatalf("expected authentication failure, got session=%v err=%v", session, err)
+	}
+	seenPost := false
+	deadline := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case method := <-requests:
+			if method == http.MethodGet {
+				t.Fatal("authentication failure triggered an SSE fallback probe")
+			}
+			seenPost = seenPost || method == http.MethodPost
+		case <-deadline:
+			if !seenPost {
+				t.Fatal("upstream was not contacted")
+			}
+			return
+		}
 	}
 }
 
@@ -350,6 +409,42 @@ func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("allowlist was not reloaded; last tools: %#v", listedToolNames(t, ctx, session))
+}
+
+func TestProxyPassesThroughMissingEntryAndReloadsWhenItAppears(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	writeRules := func(contents string) {
+		t.Helper()
+		if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRules(`{"entries":{}}`)
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"test", "--config", configPath, "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "pass-through-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	waitForToolNames(t, ctx, session, []string{"hidden", "slow", "visible"})
+
+	time.Sleep(150 * time.Millisecond)
+	writeRules(`{"entries":{"test":{"allow":["visible"],"metadata":{"tools":{"visible":{"title":"Only this tool"}}}}}}`)
+	waitForToolNames(t, ctx, session, []string{"visible"})
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil || tools.Tools[0].Title != "Only this tool" {
+		t.Fatalf("entry metadata was not applied: %#v, %v", tools, err)
+	}
+
+	writeRules(`{"entries":{}}`)
+	waitForToolNames(t, ctx, session, []string{"hidden", "slow", "visible"})
 }
 
 func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
@@ -522,7 +617,7 @@ func connectRemoteForTest(t *testing.T, transport, endpoint string) []*mcp.Tool 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, session, tools, err := connect(ctx, proxyOptions{entry: "test", config: configPath, transport: transport, url: endpoint}, nil)
+	_, _, session, tools, err := connect(ctx, proxyOptions{entry: "test", config: configPath, transport: transport, url: endpoint}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
