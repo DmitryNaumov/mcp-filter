@@ -169,3 +169,5 @@ Codex / Claude config
 - metadata инструмента сохраняется при его временном удалении из allowlist;
 - вызов разрешённого инструмента сохраняет аргументы и результат upstream;
 - macOS, Linux и Windows release binaries проходят smoke test.
+
+Детализированный список оставшихся работ и отмеченных инкрементов: [docs/BACKLOG.md](BACKLOG.md).

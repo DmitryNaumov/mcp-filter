@@ -249,7 +249,9 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 	if entry.Allow == nil {
 		return config.Entry{}, nil, nil, fmt.Errorf("entry %q must declare allow explicitly", opts.entry)
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-filter", Version: version}, &mcp.ClientOptions{Logger: slog.Default()})
+	client := newUpstreamClient(func(kind string) {
+		slog.Default().Info("upstream MCP list changed; refresh is pending implementation", "entry", opts.entry, "kind", kind)
+	})
 	transport, err := newTransport(opts, command)
 	if err != nil {
 		return config.Entry{}, nil, nil, err
@@ -264,6 +266,26 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 		return config.Entry{}, nil, nil, fmt.Errorf("list upstream tools for %q: %w", opts.entry, err)
 	}
 	return entry, session, result.Tools, nil
+}
+
+func newUpstreamClient(onChange func(kind string)) *mcp.Client {
+	notify := func(kind string) {
+		if onChange != nil {
+			onChange(kind)
+		}
+	}
+	return mcp.NewClient(&mcp.Implementation{Name: "mcp-filter", Version: version}, &mcp.ClientOptions{
+		Logger: slog.Default(),
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+			notify("tools")
+		},
+		PromptListChangedHandler: func(context.Context, *mcp.PromptListChangedRequest) {
+			notify("prompts")
+		},
+		ResourceListChangedHandler: func(context.Context, *mcp.ResourceListChangedRequest) {
+			notify("resources")
+		},
+	})
 }
 
 func loadConfig(path string) (config.Config, error) {

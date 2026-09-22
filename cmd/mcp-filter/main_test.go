@@ -90,6 +90,50 @@ func TestToolMetadataPatchMergesNamedAndGenericPatches(t *testing.T) {
 	}
 }
 
+func TestUpstreamClientReceivesListChangedNotifications(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "dynamic", Version: "1"}, &mcp.ServerOptions{
+		Capabilities: &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{ListChanged: true},
+			Prompts:   &mcp.PromptCapabilities{ListChanged: true},
+			Resources: &mcp.ResourceCapabilities{ListChanged: true},
+		},
+	})
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+
+	events := make(chan string, 3)
+	clientSession, err := newUpstreamClient(func(kind string) { events <- kind }).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	server.AddTool(&mcp.Tool{Name: "dynamic-tool", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return nil, nil })
+	server.AddPrompt(&mcp.Prompt{Name: "dynamic-prompt"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) { return nil, nil })
+	server.AddResource(&mcp.Resource{URI: "test://dynamic", Name: "dynamic-resource"}, func(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) { return nil, nil })
+
+	want := map[string]bool{"tools": false, "prompts": false, "resources": false}
+	for range want {
+		select {
+		case kind := <-events:
+			want[kind] = true
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for upstream list changes: %#v", want)
+		}
+	}
+	for kind, received := range want {
+		if !received {
+			t.Fatalf("missing %s list change", kind)
+		}
+	}
+}
+
 func TestOverlayServerChangesDisplayMetadataButNotIdentity(t *testing.T) {
 	server, instructions, err := overlayServer("tracker", nil, map[string]any{
 		"title":        "Project tracker",
