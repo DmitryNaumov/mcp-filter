@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sourcecraft/mcp-filter/internal/config"
 )
@@ -52,6 +54,10 @@ func proxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	configPath, err := resolveConfigPath(opts.config)
+	if err != nil {
+		return err
+	}
 	entry, session, tools, err := connect(ctx, opts, command)
 	if err != nil {
 		return err
@@ -62,38 +68,32 @@ func proxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("apply server metadata: %w", err)
 	}
-	server := mcp.NewServer(implementation, &mcp.ServerOptions{Instructions: instructions, Logger: slog.Default()})
+	server := mcp.NewServer(implementation, &mcp.ServerOptions{
+		Logger:       slog.Default(),
+		Instructions: instructions,
+		Capabilities: &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{ListChanged: true},
+			Prompts:   &mcp.PromptCapabilities{ListChanged: true},
+			Resources: &mcp.ResourceCapabilities{ListChanged: true},
+		},
+	})
 	if err := attachPassthroughPrimitives(ctx, server, session, entry); err != nil {
 		return err
 	}
-	for _, upstreamTool := range tools {
-		if !entry.Allowed(upstreamTool.Name) {
-			continue
-		}
-		patch, err := toolMetadataPatch(entry, upstreamTool)
-		if err != nil {
-			return fmt.Errorf("select metadata for tool %q: %w", upstreamTool.Name, err)
-		}
-		tool, err := overlayTool(upstreamTool, patch)
-		if err != nil {
-			return fmt.Errorf("apply metadata for tool %q: %w", upstreamTool.Name, err)
-		}
-		name := upstreamTool.Name
-		server.AddTool(tool, func(callCtx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			var arguments any = map[string]any{}
-			if len(request.Params.Arguments) != 0 {
-				if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
-					return nil, fmt.Errorf("decode tool arguments: %w", err)
-				}
-			}
-			if opts.timeout > 0 {
-				var cancel context.CancelFunc
-				callCtx, cancel = context.WithTimeout(callCtx, opts.timeout)
-				defer cancel()
-			}
-			return session.CallTool(callCtx, &mcp.CallToolParams{Name: name, Arguments: arguments})
-		})
+	filteredTools, err := prepareAllowedTools(tools, entry)
+	if err != nil {
+		return err
 	}
+	addTools(server, session, filteredTools, opts.timeout)
+	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry) error {
+		filteredTools, err := prepareAllowedTools(tools, updated)
+		if err != nil {
+			return err
+		}
+		server.RemoveTools(toolNames(tools)...)
+		addTools(server, session, filteredTools, opts.timeout)
+		return nil
+	})
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
@@ -250,7 +250,7 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 		return config.Entry{}, nil, nil, fmt.Errorf("entry %q must declare allow explicitly", opts.entry)
 	}
 	client := newUpstreamClient(func(kind string) {
-		slog.Default().Info("upstream MCP list changed; refresh is pending implementation", "entry", opts.entry, "kind", kind)
+		slog.Default().Info("upstream MCP list changed; upstream refresh is pending implementation", "entry", opts.entry, "kind", kind)
 	})
 	transport, err := newTransport(opts, command)
 	if err != nil {
@@ -293,6 +293,128 @@ func loadConfig(path string) (config.Config, error) {
 		return config.LoadPath(path)
 	}
 	return config.Load(".")
+}
+
+func resolveConfigPath(path string) (string, error) {
+	if path != "" {
+		return filepath.Abs(path)
+	}
+	return config.ResolvePath(".")
+}
+
+func prepareAllowedTools(tools []*mcp.Tool, entry config.Entry) ([]*mcp.Tool, error) {
+	filtered := make([]*mcp.Tool, 0, len(tools))
+	for _, upstreamTool := range tools {
+		if !entry.Allowed(upstreamTool.Name) {
+			continue
+		}
+		patch, err := toolMetadataPatch(entry, upstreamTool)
+		if err != nil {
+			return nil, fmt.Errorf("select metadata for tool %q: %w", upstreamTool.Name, err)
+		}
+		tool, err := overlayTool(upstreamTool, patch)
+		if err != nil {
+			return nil, fmt.Errorf("apply metadata for tool %q: %w", upstreamTool.Name, err)
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered, nil
+}
+
+func addTools(server *mcp.Server, session *mcp.ClientSession, tools []*mcp.Tool, timeout time.Duration) {
+	for _, tool := range tools {
+		name := tool.Name
+		server.AddTool(tool, func(callCtx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			var arguments any = map[string]any{}
+			if len(request.Params.Arguments) != 0 {
+				if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
+					return nil, fmt.Errorf("decode tool arguments: %w", err)
+				}
+			}
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				callCtx, cancel = context.WithTimeout(callCtx, timeout)
+				defer cancel()
+			}
+			return session.CallTool(callCtx, &mcp.CallToolParams{Name: name, Arguments: arguments})
+		})
+	}
+}
+
+func toolNames(tools []*mcp.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func watchRules(ctx context.Context, basePath, entryName string, apply func(config.Entry) error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		slog.Default().Error("start rules watcher", "error", err)
+		return
+	}
+	defer watcher.Close()
+	directory := filepath.Dir(basePath)
+	if err := watcher.Add(directory); err != nil {
+		slog.Default().Error("watch rules directory", "error", err)
+		return
+	}
+	baseName := filepath.Base(basePath)
+	pending := false
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
+	queueReload := func() {
+		if pending {
+			return
+		}
+		pending = true
+		timer.Reset(100 * time.Millisecond)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			name := filepath.Base(event.Name)
+			if name == baseName || name == config.LocalFile {
+				queueReload()
+			}
+		case err, ok := <-watcher.Errors:
+			if ok {
+				slog.Default().Error("watch rules", "error", err)
+			}
+		case <-timer.C:
+			pending = false
+			cfg, err := config.LoadPath(basePath)
+			if err != nil {
+				slog.Default().Error("reload rules", "path", basePath, "error", err)
+				continue
+			}
+			entry, err := cfg.Entry(entryName)
+			if err != nil {
+				slog.Default().Error("reload rules entry", "entry", entryName, "error", err)
+				continue
+			}
+			if entry.Allow == nil {
+				slog.Default().Error("reload rules entry has no allowlist", "entry", entryName)
+				continue
+			}
+			if err := apply(entry); err != nil {
+				slog.Default().Error("apply reloaded rules", "entry", entryName, "error", err)
+				continue
+			}
+			slog.Default().Info("reloaded MCP filter rules", "entry", entryName)
+		}
+	}
 }
 
 func newTransport(opts proxyOptions, command []string) (mcp.Transport, error) {

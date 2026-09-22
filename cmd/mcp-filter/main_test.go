@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -287,6 +288,118 @@ func TestProxyTimesOutUpstreamToolCall(t *testing.T) {
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "slow", Arguments: map[string]any{}}); err == nil {
 		t.Fatal("slow tool call unexpectedly succeeded")
 	}
+}
+
+func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	writeRules := func(allow string) {
+		t.Helper()
+		contents := []byte(`{"entries":{"test":{"allow":["` + allow + `"]}}}`)
+		if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRules("visible")
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "watcher-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if names := listedToolNames(t, ctx, session); len(names) != 1 || names[0] != "visible" {
+		t.Fatalf("unexpected initial tools: %#v", names)
+	}
+
+	// Give the proxy time to subscribe to its config directory before changing it.
+	time.Sleep(150 * time.Millisecond)
+	writeRules("hidden")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		names := listedToolNames(t, ctx, session)
+		if len(names) == 1 && names[0] == "hidden" {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("allowlist was not reloaded; last tools: %#v", listedToolNames(t, ctx, session))
+}
+
+func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".mcp-filter.json")
+	localPath := filepath.Join(dir, ".mcp-filter.local.json")
+	if err := os.WriteFile(configPath, []byte(`{"entries":{"test":{"allow":["visible"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "watcher-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if names := listedToolNames(t, ctx, session); len(names) != 1 || names[0] != "visible" {
+		t.Fatalf("unexpected initial tools: %#v", names)
+	}
+
+	// Give the proxy time to subscribe before exercising create and remove events.
+	time.Sleep(150 * time.Millisecond)
+	if err := os.WriteFile(localPath, []byte(`{"entries":{"test":{"allow":["hidden"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForToolNames(t, ctx, session, []string{"hidden"})
+	if err := os.Remove(localPath); err != nil {
+		t.Fatal(err)
+	}
+	waitForToolNames(t, ctx, session, []string{"visible"})
+	if err := os.WriteFile(localPath, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A broken edit is ignored; the most recently valid rules remain published.
+	time.Sleep(250 * time.Millisecond)
+	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"visible"}) {
+		t.Fatalf("invalid local rules replaced the active tool list: %#v", names)
+	}
+}
+
+func listedToolNames(t *testing.T, ctx context.Context, session *mcp.ClientSession) []string {
+	t.Helper()
+	list, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(list.Tools))
+	for _, tool := range list.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func waitForToolNames(t *testing.T, ctx context.Context, session *mcp.ClientSession, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		names := listedToolNames(t, ctx, session)
+		if reflect.DeepEqual(names, want) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("tool list was not reloaded; got %#v, want %#v", listedToolNames(t, ctx, session), want)
 }
 
 func TestValidateUpstreamRejectsMissingAllowedTool(t *testing.T) {

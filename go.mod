@@ -2,7 +2,10 @@ module github.com/sourcecraft/mcp-filter
 
 go 1.24.0
 
-require github.com/modelcontextprotocol/go-sdk v1.3.1
+require (
+	github.com/fsnotify/fsnotify v1.10.1
+	github.com/modelcontextprotocol/go-sdk v1.3.1
+)
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect

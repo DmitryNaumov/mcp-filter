@@ -35,11 +35,16 @@ type Patch struct {
 }
 
 func Load(dir string) (Config, error) {
-	basePath, err := findUp(dir, BaseFile)
+	basePath, err := ResolvePath(dir)
 	if err != nil {
 		return Config{}, err
 	}
 	return LoadPath(basePath)
+}
+
+// ResolvePath finds the base rules file by walking from dir towards the root.
+func ResolvePath(dir string) (string, error) {
+	return findUp(dir, BaseFile)
 }
 
 // LoadPath loads an explicit base rules file and an optional local override

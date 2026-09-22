@@ -8,7 +8,8 @@
 - [ ] Отправлять downstream-клиенту соответствующее `*_list_changed` только после успешного refresh.
 - [ ] Поддержать `notifications/resources/updated` и relay resource subscriptions.
 - [ ] После обновления Go и MCP SDK перейти на MCP 2026-07-28 `subscriptions/listen`; сохранить legacy notifications для старых upstream.
-- [ ] Добавить file watcher для `.mcp-filter.json` и `.mcp-filter.local.json`, с debounce и безопасным rollback при невалидной конфигурации.
+- [x] Добавить file watcher для `.mcp-filter.json` и `.mcp-filter.local.json`: debounce, сохранение прежнего tool list при невалидной конфигурации, downstream `tools/list_changed` после успешного обновления.
+- [ ] Обновлять через file watcher metadata сервера, prompts, resources и resource templates.
 
 ## Metadata and protocol transparency
 
