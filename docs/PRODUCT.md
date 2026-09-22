@@ -51,7 +51,6 @@ Codex / Claude config
 
 ```json
 {
-  "$schema": "https://mcp-filter.dev/schema/v1.json",
   "mcpServers": {
     "tracker": {
       "allow": ["get_issue", "search_issues"],
