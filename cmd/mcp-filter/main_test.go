@@ -227,7 +227,7 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 
 	proxyCommand := exec.Command(
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
-		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		"test", "--config", configPath, "--",
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
 	)
 	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
@@ -294,7 +294,7 @@ func TestProxyTimesOutUpstreamToolCall(t *testing.T) {
 	}
 	proxyCommand := exec.Command(
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
-		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--timeout", "10ms", "--",
+		"test", "--config", configPath, "--timeout", "10ms", "--",
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
 	)
 	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
@@ -322,7 +322,7 @@ func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 	writeRules("visible")
 	proxyCommand := exec.Command(
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
-		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		"test", "--config", configPath, "--",
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
 	)
 	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
@@ -361,7 +361,7 @@ func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
 	}
 	proxyCommand := exec.Command(
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
-		"proxy", "--entry", "test", "--config", configPath, "--transport", "stdio", "--",
+		"test", "--config", configPath, "--",
 		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream",
 	)
 	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
@@ -461,12 +461,10 @@ func TestMCPFilterHelperProcess(t *testing.T) {
 	}
 	var err error
 	switch args[0] {
-	case "proxy":
-		err = proxy(context.Background(), args[1:])
 	case "upstream":
 		err = runE2EUpstream(context.Background())
 	default:
-		err = fmt.Errorf("unknown helper command %q", args[0])
+		err = proxy(context.Background(), args)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

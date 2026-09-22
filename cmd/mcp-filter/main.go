@@ -32,8 +32,6 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
-	case "proxy":
-		err = proxy(ctx, os.Args[2:])
 	case "validate":
 		err = validate(ctx, os.Args[2:])
 	case "inspect":
@@ -211,7 +209,7 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 		positionalEntry = args[0]
 		args = args[1:]
 	}
-	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
+	fs := flag.NewFlagSet("mcp-filter", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var opts proxyOptions
 	fs.StringVar(&opts.entry, "entry", "", "configured entry name")

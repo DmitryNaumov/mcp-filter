@@ -133,7 +133,7 @@ Codex / Claude config
 
 ### Этап 1 — конфигурация и CLI
 
-1. Go module и команды `proxy`, `validate`, `inspect`, `version`.
+1. Go module, запуск proxy как `mcp-filter ENTRY` и команды `validate`, `inspect`, `version`.
 2. Поиск base/local, слияние policies, JSON Schema, JSON Merge Patch и redaction.
 3. Unit-тесты: allowlist независимо от overlays, local priority, пустой allowlist.
 
