@@ -6,9 +6,9 @@
 
 Начни строго с MVP из `docs/PRODUCT.md`:
 
-1. Создай CLI `mcp-filter` с командами `proxy`, `validate`, `inspect`, `version`.
-2. `proxy --entry NAME` принимает stdio от хоста и подключается ровно к одному upstream через stdio, Streamable HTTP или legacy SSE. Transport-параметры передаются только CLI-аргументами из client config.
-3. `proxy` читает base и local rules, получает upstream `tools/list`, публикует только `allow` и сохраняет исходные имена инструментов.
+1. Создай CLI `mcp-filter` с запуском proxy как `mcp-filter ENTRY`, а также командами `validate`, `inspect`, `version`.
+2. `mcp-filter ENTRY` принимает stdio от хоста и подключается ровно к одному upstream через stdio, Streamable HTTP или legacy SSE. Transport-параметры передаются только CLI-аргументами из client config.
+3. Proxy читает base и local rules, получает upstream `tools/list`, публикует только `allow` и сохраняет исходные имена инструментов.
 4. Реализуй независимые `metadata.server` и `metadata.tools.<tool>` как JSON Merge Patch для любой неисполняемой metadata upstream. Не меняй `tool.name`, JSON-RPC id/method, аргументы вызова или значения результатов.
 5. На `tools/call` проверяй исходное имя, перенаправляй его и аргументы upstream, не меняя результат.
 6. Не пиши ничего, кроме MCP JSON-RPC, в stdout. Логи направляй в stderr. Никогда не логируй значения переменных окружения и секреты.

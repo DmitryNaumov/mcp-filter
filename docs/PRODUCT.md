@@ -14,11 +14,11 @@ MCP-клиенты получают полный `tools/list`: имена, оп�
 
 ## Архитектура
 
-Каждый зарегистрированный MCP-сервер оборачивается независимо. `mcp-filter proxy` — stdio MCP-server для хоста и MCP-client ровно для одного upstream.
+Каждый зарегистрированный MCP-сервер оборачивается независимо. `mcp-filter <entry>` — stdio MCP-server для хоста и MCP-client ровно для одного upstream.
 
 ```text
 Codex / Claude config
-  entry "tracker": mcp-filter proxy --entry tracker -- stdio-command …
+  entry "tracker": mcp-filter tracker -- stdio-command …
                                       │
                                       ├─ .mcp-filter.json: tracker rules
                                       └─ tracker MCP upstream
@@ -103,7 +103,7 @@ Codex / Claude config
 ```json
 "tracker": {
   "command": "mcp-filter",
-  "args": ["proxy", "--entry", "tracker", "--transport", "stdio", "--", "npx", "-y", "@acme/tracker-mcp"]
+  "args": ["tracker", "--", "npx", "-y", "@acme/tracker-mcp"]
 }
 ```
 
@@ -111,7 +111,7 @@ Codex / Claude config
 
 Было: `url = "https://mcp.example.com/mcp"`.
 
-Станет: stdio entry с `command = "mcp-filter"` и аргументами `proxy --entry example --transport streamable-http --url https://mcp.example.com/mcp`; legacy SSE использует `--transport sse`. Заголовки и источники токенов остаются явными параметрами этого entry, например `--header-env AUTHORIZATION`; в filter-config они не попадают. Реальный синтаксис Codex/Claude примеров фиксируется и тестируется на этапе интеграции.
+Станет: stdio entry с `command = "mcp-filter"` и аргументами `example --transport streamable-http --url https://mcp.example.com/mcp`; legacy SSE использует `--transport sse`. Заголовки и источники токенов остаются явными параметрами этого entry, например `--header-env AUTHORIZATION`; в filter-config они не попадают. Реальный синтаксис Codex/Claude примеров фиксируется и тестируется на этапе интеграции.
 
 ## Требования безопасности и качества
 

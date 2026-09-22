@@ -15,6 +15,12 @@
           }
         }
       }
+    },
+    "remote-docs": {
+      "allow": ["search_docs"]
+    },
+    "legacy-events": {
+      "allow": ["get_events"]
     }
   }
 }

@@ -10,9 +10,9 @@ Prompts, resources и resource templates передаются без фильт�
 
 Оставшиеся задачи и прогресс по динамическим обновлениям: [docs/BACKLOG.md](docs/BACKLOG.md).
 
-Стартовый конфиг: [examples/.mcp-filter.json](examples/.mcp-filter.json). Для запуска вне корня проекта передайте явный путь: `mcp-filter proxy --config /path/.mcp-filter.json …`.
+Стартовый конфиг: [examples/.mcp-filter.json](examples/.mcp-filter.json). Для запуска вне корня проекта передайте явный путь: `mcp-filter tracker --config /path/.mcp-filter.json -- …`.
 
-Проверка без запуска upstream: `mcp-filter validate --entry tracker`. Для сверки allowlist с фактическим сервером: `mcp-filter validate --check-upstream --entry tracker --transport stdio -- npx -y @acme/tracker-mcp`.
+Проверка без запуска upstream: `mcp-filter validate --entry tracker`. Для сверки allowlist с фактическим сервером: `mcp-filter validate --check-upstream tracker -- npx -y @acme/tracker-mcp`.
 
 По умолчанию вызов upstream-инструмента ограничен 120 секундами. Измените предел флагом `--timeout 30s`; `--timeout 0` отключает ограничение.
 

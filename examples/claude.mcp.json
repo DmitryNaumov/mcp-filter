@@ -3,9 +3,7 @@
     "tracker": {
       "command": "mcp-filter",
       "args": [
-        "proxy",
-        "--entry", "tracker",
-        "--transport", "stdio",
+        "tracker",
         "--",
         "npx", "-y", "@acme/tracker-mcp"
       ]
@@ -13,8 +11,7 @@
     "remote-docs": {
       "command": "mcp-filter",
       "args": [
-        "proxy",
-        "--entry", "remote-docs",
+        "remote-docs",
         "--transport", "streamable-http",
         "--url", "https://mcp.example.com/mcp",
         "--header-env", "Authorization=REMOTE_DOCS_TOKEN"
@@ -22,6 +19,14 @@
       "env": {
         "REMOTE_DOCS_TOKEN": "Bearer replace-me"
       }
+    },
+    "legacy-events": {
+      "command": "mcp-filter",
+      "args": [
+        "legacy-events",
+        "--transport", "sse",
+        "--url", "https://events.example.com/sse"
+      ]
     }
   }
 }

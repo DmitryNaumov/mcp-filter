@@ -26,7 +26,7 @@ const version = "0.1.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: mcp-filter <proxy|validate|inspect|version>")
+		fatal("usage: mcp-filter <entry> [options] [-- upstream-command] | <validate|inspect|version>")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -42,7 +42,7 @@ func main() {
 		fmt.Println(version)
 		return
 	default:
-		err = fmt.Errorf("unknown command %q", os.Args[1])
+		err = proxy(ctx, os.Args[1:])
 	}
 	if err != nil {
 		fatal(err.Error())
@@ -206,6 +206,11 @@ func (h *headerEnvFlags) Set(value string) error {
 }
 
 func parseProxyFlags(args []string) (proxyOptions, []string, error) {
+	var positionalEntry string
+	if len(args) > 0 && args[0] != "--" && !strings.HasPrefix(args[0], "-") {
+		positionalEntry = args[0]
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var opts proxyOptions
@@ -219,8 +224,14 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	if err := fs.Parse(args); err != nil {
 		return proxyOptions{}, nil, err
 	}
+	if positionalEntry != "" {
+		if opts.entry != "" && opts.entry != positionalEntry {
+			return proxyOptions{}, nil, fmt.Errorf("entry %q conflicts with positional entry %q", opts.entry, positionalEntry)
+		}
+		opts.entry = positionalEntry
+	}
 	if opts.entry == "" {
-		return proxyOptions{}, nil, errors.New("--entry is required")
+		return proxyOptions{}, nil, errors.New("entry name is required as the first argument or --entry")
 	}
 	switch opts.transport {
 	case "stdio":

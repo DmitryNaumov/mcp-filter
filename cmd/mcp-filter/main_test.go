@@ -167,6 +167,26 @@ func TestParseProxyFlags(t *testing.T) {
 	}
 }
 
+func TestParseProxyFlagsAcceptsPositionalEntry(t *testing.T) {
+	opts, command, err := parseProxyFlags([]string{"tracker", "--config", "/tmp/.mcp-filter.json", "--", "fake-mcp", "--serve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.entry != "tracker" || opts.transport != "stdio" || opts.config != "/tmp/.mcp-filter.json" {
+		t.Fatalf("unexpected options: %#v", opts)
+	}
+	if got, want := strings.Join(command, " "), "fake-mcp --serve"; got != want {
+		t.Fatalf("unexpected upstream command: %q", got)
+	}
+}
+
+func TestParseProxyFlagsRejectsConflictingEntries(t *testing.T) {
+	_, _, err := parseProxyFlags([]string{"tracker", "--entry", "docs", "--", "fake-mcp"})
+	if err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("expected conflicting entries error, got %v", err)
+	}
+}
+
 func TestParseProxyFlagsUsesConfiguredToolTimeout(t *testing.T) {
 	opts, _, err := parseProxyFlags([]string{"--entry", "tracker", "--timeout", "3s", "--", "fake-mcp"})
 	if err != nil {
