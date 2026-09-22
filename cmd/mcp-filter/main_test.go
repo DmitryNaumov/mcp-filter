@@ -197,6 +197,16 @@ func TestParseProxyFlagsRejectsConflictingEntries(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsPositionalServerName(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"tracker":{"allow":["get_issue"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validate(context.Background(), []string{"tracker", "--config", configPath}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestParseProxyFlagsUsesConfiguredToolTimeout(t *testing.T) {
 	opts, _, err := parseProxyFlags([]string{"--entry", "tracker", "--timeout", "3s", "--", "fake-mcp"})
 	if err != nil {

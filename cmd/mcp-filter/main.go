@@ -22,11 +22,25 @@ import (
 	"github.com/sourcecraft/mcp-filter/internal/config"
 )
 
-const version = "0.1.0-dev"
+const (
+	version = "0.1.0-dev"
+	usage   = `usage:
+  mcp-filter SERVER [options] [-- UPSTREAM_COMMAND [args...]]
+  mcp-filter validate SERVER [--config PATH]
+  mcp-filter validate --check-upstream SERVER [options] [-- UPSTREAM_COMMAND [args...]]
+  mcp-filter inspect SERVER [options] [-- UPSTREAM_COMMAND [args...]]
+  mcp-filter version
+
+SERVER is the MCP server name: a key in mcpServers in .mcp-filter.json.
+Without that key, mcp-filter runs as a transparent pass-through.
+validate checks rules syntax and the allowlist; --check-upstream also verifies
+that allowed tools exist upstream. inspect lists tools that would be published.
+version prints the mcp-filter build version.`
+)
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: mcp-filter <entry> [options] [-- upstream-command] | <validate|inspect|version>")
+		fatal(usage)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -101,13 +115,20 @@ func validate(ctx context.Context, args []string) error {
 	}
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	entryName := fs.String("entry", "", "configured entry name")
+	serverName := positionalServerName(&args)
+	entryName := fs.String("entry", "", "MCP server name; prefer the first positional argument")
 	configPath := fs.String("config", "", "path to .mcp-filter.json (defaults to upward search)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if serverName != "" {
+		if *entryName != "" && *entryName != serverName {
+			return fmt.Errorf("server name %q conflicts with --entry %q", serverName, *entryName)
+		}
+		*entryName = serverName
+	}
 	if *entryName == "" {
-		return errors.New("--entry is required")
+		return errors.New("MCP server name is required as the first argument or --entry")
 	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -118,9 +139,9 @@ func validate(ctx context.Context, args []string) error {
 		return err
 	}
 	if entry.Allow == nil {
-		return fmt.Errorf("entry %q must declare allow explicitly", *entryName)
+		return fmt.Errorf("MCP server %q must declare allow explicitly", *entryName)
 	}
-	fmt.Fprintf(os.Stdout, "entry %q is valid (%d allowed tools)\n", *entryName, len(entry.Allow))
+	fmt.Fprintf(os.Stdout, "MCP server %q is valid (%d allowed tools)\n", *entryName, len(entry.Allow))
 	return nil
 }
 
@@ -140,7 +161,7 @@ func validateUpstream(ctx context.Context, args []string) error {
 	}
 	var missing []string
 	if !configured {
-		return fmt.Errorf("entry %q not configured", opts.entry)
+		return fmt.Errorf("MCP server %q is not configured", opts.entry)
 	}
 	for _, allowed := range entry.Allow {
 		if _, ok := available[allowed]; !ok {
@@ -148,9 +169,9 @@ func validateUpstream(ctx context.Context, args []string) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("entry %q allowlist references unavailable upstream tools: %s", opts.entry, strings.Join(missing, ", "))
+		return fmt.Errorf("MCP server %q allowlist references unavailable upstream tools: %s", opts.entry, strings.Join(missing, ", "))
 	}
-	fmt.Fprintf(os.Stdout, "entry %q matches upstream (%d allowed tools)\n", opts.entry, len(entry.Allow))
+	fmt.Fprintf(os.Stdout, "MCP server %q matches upstream (%d allowed tools)\n", opts.entry, len(entry.Allow))
 	return nil
 }
 
@@ -207,15 +228,11 @@ func (h *headerEnvFlags) Set(value string) error {
 }
 
 func parseProxyFlags(args []string) (proxyOptions, []string, error) {
-	var positionalEntry string
-	if len(args) > 0 && args[0] != "--" && !strings.HasPrefix(args[0], "-") {
-		positionalEntry = args[0]
-		args = args[1:]
-	}
+	positionalEntry := positionalServerName(&args)
 	fs := flag.NewFlagSet("mcp-filter", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var opts proxyOptions
-	fs.StringVar(&opts.entry, "entry", "", "configured entry name")
+	fs.StringVar(&opts.entry, "entry", "", "MCP server name; prefer the first positional argument")
 	fs.StringVar(&opts.config, "config", "", "path to .mcp-filter.json (defaults to upward search)")
 	fs.StringVar(&opts.transport, "transport", "", "upstream transport: stdio, auto, streamable-http, or sse")
 	fs.StringVar(&opts.url, "url", "", "upstream HTTP endpoint")
@@ -227,12 +244,12 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	}
 	if positionalEntry != "" {
 		if opts.entry != "" && opts.entry != positionalEntry {
-			return proxyOptions{}, nil, fmt.Errorf("entry %q conflicts with positional entry %q", opts.entry, positionalEntry)
+			return proxyOptions{}, nil, fmt.Errorf("MCP server name %q conflicts with positional name %q", opts.entry, positionalEntry)
 		}
 		opts.entry = positionalEntry
 	}
 	if opts.entry == "" {
-		return proxyOptions{}, nil, errors.New("entry name is required as the first argument or --entry")
+		return proxyOptions{}, nil, errors.New("MCP server name is required as the first argument or --entry")
 	}
 	if opts.transport == "" {
 		if opts.url != "" {
@@ -254,6 +271,15 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 		return proxyOptions{}, nil, fmt.Errorf("unsupported transport %q", opts.transport)
 	}
 	return opts, fs.Args(), nil
+}
+
+func positionalServerName(args *[]string) string {
+	if len(*args) == 0 || (*args)[0] == "--" || strings.HasPrefix((*args)[0], "-") {
+		return ""
+	}
+	name := (*args)[0]
+	*args = (*args)[1:]
+	return name
 }
 
 func connect(ctx context.Context, opts proxyOptions, command []string) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
