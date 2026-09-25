@@ -33,6 +33,8 @@ Prompts, resources и resource templates передаются без фильт�
 
 `directory` разрешается относительно каталога rules-файла. Поддерживаются уровни `error`, `warn`, `info`, `debug` и форматы `text`, `json`; по умолчанию — `warn` и `text`. Если раздел `logging` отсутствует, предупреждения и ошибки остаются в `stderr`, а файлов не создаётся. В логи не попадают аргументы и результаты вызовов, HTTP-заголовки и значения окружения.
 
+При запуске proxy файл лога открывается до подключения к upstream MCP-серверу. На уровне `info` в него сразу записывается событие начала работы; ошибки подключения и другие ошибки proxy записываются на уровне `error` перед завершением процесса.
+
 Прокси всегда объявляет capability `listChanged` для tools, prompts и resources. Изменения `.mcp-filter.json` или `.mcp-filter.local.json` отслеживаются во время работы: allowlist и metadata tools перезагружаются с debounce, а подключённым клиентам отправляется `notifications/tools/list_changed`. Некорректная редакция не заменяет уже работающие правила. Если entry отсутствует в обоих rules-файлах, сервер работает прозрачным pass-through; добавление entry начинает фильтрацию без перезапуска, удаление возвращает pass-through.
 
 Готовые обёртки: [Claude `.mcp.json`](examples/claude.mcp.json) и [Codex `config.toml`](examples/codex.config.toml). Имя entry обычно совпадает с ключом `mcpServers` в rules-конфиге; отсутствующий ключ намеренно означает pass-through.

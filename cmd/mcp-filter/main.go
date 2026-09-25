@@ -61,7 +61,7 @@ func main() {
 	}
 }
 
-func proxy(ctx context.Context, args []string) error {
+func proxy(ctx context.Context, args []string) (proxyErr error) {
 	opts, command, err := parseProxyFlags(args)
 	if err != nil {
 		return err
@@ -79,6 +79,12 @@ func proxy(ctx context.Context, args []string) error {
 		return err
 	}
 	defer closeLogger()
+	defer func() {
+		if proxyErr != nil {
+			slog.Error("MCP proxy failed", "error", proxyErr)
+		}
+	}()
+	slog.Info("MCP proxy starting", "transport", opts.transport)
 	entry, configured, session, tools, err := connectWithConfig(ctx, opts, command, cfg)
 	if err != nil {
 		return err

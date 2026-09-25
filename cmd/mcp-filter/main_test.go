@@ -246,6 +246,30 @@ func TestConfigureLoggerWritesOneSafeFilePerEntry(t *testing.T) {
 	}
 }
 
+func TestProxyLogsStartupAndUpstreamFailure(t *testing.T) {
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".mcp-filter.json")
+	contents := `{"logging":{"directory":"logs","level":"info","format":"json"},"mcpServers":{"tracker":{"allow":[]}}}`
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := proxy(context.Background(), []string{"tracker", "--config", configPath, "--", filepath.Join(dir, "missing-upstream")})
+	if err == nil {
+		t.Fatal("expected upstream connection to fail")
+	}
+	logContents, err := os.ReadFile(filepath.Join(dir, "logs", "tracker.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup := strings.Index(string(logContents), `"msg":"MCP proxy starting"`)
+	failure := strings.Index(string(logContents), `"msg":"MCP proxy failed"`)
+	if startup < 0 || failure <= startup {
+		t.Fatalf("expected startup before upstream failure, got: %s", logContents)
+	}
+}
+
 func TestEntryLogFileNameDoesNotInterpretEntryAsPath(t *testing.T) {
 	name := entryLogFileName("../../private")
 	if strings.ContainsAny(name, `/\\`) || !strings.HasSuffix(name, ".log") {
