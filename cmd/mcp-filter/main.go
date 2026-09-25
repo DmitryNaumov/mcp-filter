@@ -108,19 +108,13 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 	if err := attachPassthroughPrimitives(ctx, server, session, entry); err != nil {
 		return err
 	}
-	filteredTools, err := prepareAllowedTools(tools, entry, configured)
+	state, err := newToolState(server, session, opts.entry, tools, entry, configured, opts.timeout)
 	if err != nil {
 		return err
 	}
-	addTools(server, session, filteredTools, opts.timeout)
+	state.publishInitial()
 	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry, configured bool) error {
-		filteredTools, err := prepareAllowedTools(tools, updated, configured)
-		if err != nil {
-			return err
-		}
-		server.RemoveTools(toolNames(tools)...)
-		addTools(server, session, filteredTools, opts.timeout)
-		return nil
+		return state.reload(updated, configured)
 	})
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
@@ -154,8 +148,8 @@ func validate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if entry.Allow == nil {
-		return fmt.Errorf("MCP server %q must declare allow explicitly", *entryName)
+	if err := entry.Validate(); err != nil {
+		return fmt.Errorf("MCP server %q: %w", *entryName, err)
 	}
 	fmt.Fprintf(os.Stdout, "MCP server %q is valid (%d allowed tools)\n", *entryName, len(entry.Allow))
 	return nil
@@ -205,6 +199,8 @@ func inspect(ctx context.Context, args []string) error {
 		status := "hidden"
 		if !configured || entry.Allowed(tool.Name) {
 			status = "published"
+		} else if !entry.Denied(tool.Name) {
+			status = "discoverable"
 		}
 		fmt.Fprintf(os.Stdout, "%s\t%s\n", status, tool.Name)
 	}
@@ -308,8 +304,10 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 
 func connectWithConfig(ctx context.Context, opts proxyOptions, command []string, cfg config.Config) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
 	entry, configured := cfg.Lookup(opts.entry)
-	if configured && entry.Allow == nil {
-		return config.Entry{}, false, nil, nil, fmt.Errorf("entry %q must declare allow explicitly", opts.entry)
+	if configured {
+		if err := entry.Validate(); err != nil {
+			return config.Entry{}, false, nil, nil, fmt.Errorf("entry %q: %w", opts.entry, err)
+		}
 	}
 	client := newUpstreamClient(func(kind string) {
 		slog.Default().Info("upstream MCP list changed; upstream refresh is pending implementation", "entry", opts.entry, "kind", kind)
@@ -390,57 +388,6 @@ func resolveConfigPath(path string) (string, error) {
 	return config.ResolvePath(".")
 }
 
-func prepareAllowedTools(tools []*mcp.Tool, entry config.Entry, configured bool) ([]*mcp.Tool, error) {
-	filtered := make([]*mcp.Tool, 0, len(tools))
-	for _, upstreamTool := range tools {
-		if configured && !entry.Allowed(upstreamTool.Name) {
-			continue
-		}
-		if !configured {
-			filtered = append(filtered, upstreamTool)
-			continue
-		}
-		patch, err := toolMetadataPatch(entry, upstreamTool)
-		if err != nil {
-			return nil, fmt.Errorf("select metadata for tool %q: %w", upstreamTool.Name, err)
-		}
-		tool, err := overlayTool(upstreamTool, patch)
-		if err != nil {
-			return nil, fmt.Errorf("apply metadata for tool %q: %w", upstreamTool.Name, err)
-		}
-		filtered = append(filtered, tool)
-	}
-	return filtered, nil
-}
-
-func addTools(server *mcp.Server, session *mcp.ClientSession, tools []*mcp.Tool, timeout time.Duration) {
-	for _, tool := range tools {
-		name := tool.Name
-		server.AddTool(tool, func(callCtx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			var arguments any = map[string]any{}
-			if len(request.Params.Arguments) != 0 {
-				if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
-					return nil, fmt.Errorf("decode tool arguments: %w", err)
-				}
-			}
-			if timeout > 0 {
-				var cancel context.CancelFunc
-				callCtx, cancel = context.WithTimeout(callCtx, timeout)
-				defer cancel()
-			}
-			return session.CallTool(callCtx, &mcp.CallToolParams{Name: name, Arguments: arguments})
-		})
-	}
-}
-
-func toolNames(tools []*mcp.Tool) []string {
-	names := make([]string, 0, len(tools))
-	for _, tool := range tools {
-		names = append(names, tool.Name)
-	}
-	return names
-}
-
 func watchRules(ctx context.Context, basePath, entryName string, apply func(config.Entry, bool) error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -492,9 +439,11 @@ func watchRules(ctx context.Context, basePath, entryName string, apply func(conf
 				continue
 			}
 			entry, configured := cfg.Lookup(entryName)
-			if configured && entry.Allow == nil {
-				slog.Default().Error("reload rules entry has no allowlist", "entry", entryName)
-				continue
+			if configured {
+				if err := entry.Validate(); err != nil {
+					slog.Default().Error("reload rules entry invalid", "entry", entryName, "error", err)
+					continue
+				}
 			}
 			if err := apply(entry, configured); err != nil {
 				slog.Default().Error("apply reloaded rules", "entry", entryName, "error", err)

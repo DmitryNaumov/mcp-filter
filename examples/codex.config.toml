@@ -9,6 +9,10 @@ args = [
   "npx", "-y", "@acme/tracker-mcp"
 ]
 
+# call_tool can invoke any discoverable tracker tool except those in deny.
+[mcp_servers.tracker.tools.call_tool]
+approval_mode = "approve"
+
 [mcp_servers.remote-docs]
 command = "mcp-filter"
 args = [

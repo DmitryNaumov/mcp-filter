@@ -2,6 +2,7 @@
   "mcpServers": {
     "tracker": {
       "allow": ["get_issue", "search_issues"],
+      "deny": ["delete_issue"],
       "metadata": {
         "server": {
           "title": "Project tracker",

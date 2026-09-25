@@ -34,6 +34,7 @@ type Logging struct {
 
 type Entry struct {
 	Allow    []string `json:"allow"`
+	Deny     []string `json:"deny"`
 	Metadata Metadata `json:"metadata"`
 }
 
@@ -76,6 +77,11 @@ func LoadPath(basePath string) (Config, error) {
 	result := merge(base, local)
 	if err := result.ValidateLogging(); err != nil {
 		return Config{}, err
+	}
+	for name, entry := range result.MCPServers {
+		if err := entry.Validate(); err != nil {
+			return Config{}, fmt.Errorf("entry %q: %w", name, err)
+		}
 	}
 	return result, nil
 }
@@ -141,6 +147,17 @@ func read(path string) (Config, error) {
 	if _, legacy := fields["entries"]; legacy {
 		return Config{}, fmt.Errorf("parse %s: use %q instead of the retired %q field", path, "mcpServers", "entries")
 	}
+	if raw, ok := fields["mcpServers"]; ok {
+		var servers map[string]map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return Config{}, fmt.Errorf("parse %s: %w", path, err)
+		}
+		for name, entry := range servers {
+			if _, hasMode := entry["mode"]; hasMode {
+				return Config{}, fmt.Errorf("parse %s: entry %q: remove mode; tools outside allow and deny are automatically discoverable", path, name)
+			}
+		}
+	}
 	if cfg.MCPServers == nil {
 		cfg.MCPServers = map[string]Entry{}
 	}
@@ -164,6 +181,9 @@ func merge(base, local Config) Config {
 		current := result.MCPServers[name]
 		if override.Allow != nil {
 			current.Allow = override.Allow
+		}
+		if override.Deny != nil {
+			current.Deny = override.Deny
 		}
 		current.Metadata.Server = MergePatch(current.Metadata.Server, override.Metadata.Server)
 		current.Metadata.Tools = mergeTools(current.Metadata.Tools, override.Metadata.Tools)
@@ -260,4 +280,22 @@ func (e Entry) Allowed(name string) bool {
 		}
 	}
 	return false
+}
+
+func (e Entry) Denied(name string) bool {
+	for _, denied := range e.Deny {
+		if denied == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (e Entry) Validate() error {
+	for _, name := range e.Allow {
+		if e.Denied(name) {
+			return fmt.Errorf("tool %q is in both allow and deny", name)
+		}
+	}
+	return nil
 }

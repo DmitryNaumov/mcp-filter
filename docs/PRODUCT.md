@@ -34,7 +34,7 @@ Codex / Claude config
 
 - stdio-прокси для MCP-клиентов;
 - stdio, Streamable HTTP и legacy SSE upstream;
-- точный allowlist по имени инструмента; отсутствие `allow` у присутствующего entry означает ошибку, а отсутствующий entry работает прозрачным pass-through;
+- точные списки `allow` и `deny` по имени инструмента; все остальные инструменты раскрываются по запросу агента, а отсутствующий entry работает прозрачным pass-through;
 - `.mcp-filter.json` + `.mcp-filter.local.json`, где local игнорируется Git;
 - независимые overlays метаданных сервера и инструментов;
 - `validate`, `inspect`, stderr-логи и безопасные ошибки;
@@ -47,13 +47,14 @@ Codex / Claude config
 
 Процесс ищет вверх от working directory `.mcp-filter.json` и соседний `.mcp-filter.local.json`.
 
-Приоритет: `CLI flags > local > base > secure defaults`. Слияние идёт по имени entry и имени инструмента. `allow` заменяется целиком (не объединяется), чтобы local-файл не расширял права случайно. Любой metadata object накладывается как JSON Merge Patch: local может дополнить или заменить поля base. Конфиг не содержит `command`, `args`, `url`, `headers`, `env`, `cwd`, OAuth или transport.
+Приоритет: `CLI flags > local > base > secure defaults`. Слияние идёт по имени entry и имени инструмента. `allow` и `deny` заменяются целиком при явном локальном переопределении. Любой metadata object накладывается как JSON Merge Patch: local может дополнить или заменить поля base. Конфиг не содержит `command`, `args`, `url`, `headers`, `env`, `cwd`, OAuth или transport.
 
 ```json
 {
   "mcpServers": {
     "tracker": {
       "allow": ["get_issue", "search_issues"],
+      "deny": ["delete_issue"],
       "metadata": {
         "server": {
           "instructions": "Инструменты трекера для текущего проекта."
@@ -73,7 +74,7 @@ Codex / Claude config
 }
 ```
 
-`allow` и `metadata.tools` независимы: можно временно убрать `search_issues` из allowlist, не удаляя его описание. Если upstream позже вновь публикует этот инструмент, overlay автоматически снова применяется.
+`allow` и `metadata.tools` независимы: можно убрать `search_issues` из начального списка, не удаляя его описание; после этого агент сможет раскрыть инструмент по запросу. Если upstream позже вновь публикует этот инструмент, overlay автоматически снова применяется. `deny` полностью запрещает поиск, раскрытие и вызов инструмента.
 
 ### Metadata overlays
 
@@ -165,7 +166,7 @@ Codex / Claude config
 ## Критерии готовности MVP
 
 - один существующий stdio entry и один HTTP/SSE entry успешно оборачиваются без записи transport-настроек в `.mcp-filter*.json`;
-- 100% опубликованных инструментов входят в явный `allow`;
+- при подключении опубликованы только инструменты из `allow` и три вспомогательных инструмента; временно раскрытые инструменты добавляются после запроса агента;
 - metadata инструмента сохраняется при его временном удалении из allowlist;
 - вызов разрешённого инструмента сохраняет аргументы и результат upstream;
 - macOS, Linux и Windows release binaries проходят smoke test.

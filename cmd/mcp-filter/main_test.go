@@ -374,11 +374,11 @@ func TestProxyEndToEndFiltersAndForwardsStdioTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != "visible" {
+	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"call_tool", "describe_tool", "search_tools", "visible"}) {
 		t.Fatalf("unexpected published tools: %#v", list.Tools)
 	}
-	if list.Tools[0].Title != "Visible issue" {
-		t.Fatalf("generic metadata patch was not applied: %#v", list.Tools[0])
+	if list.Tools[3].Title != "Visible issue" {
+		t.Fatalf("generic metadata patch was not applied: %#v", list.Tools[3])
 	}
 	prompts, err := session.ListPrompts(ctx, nil)
 	if err != nil {
@@ -462,7 +462,7 @@ func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	if names := listedToolNames(t, ctx, session); len(names) != 1 || names[0] != "visible" {
+	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"call_tool", "describe_tool", "search_tools", "visible"}) {
 		t.Fatalf("unexpected initial tools: %#v", names)
 	}
 
@@ -473,7 +473,7 @@ func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		names := listedToolNames(t, ctx, session)
-		if len(names) == 1 && names[0] == "hidden" {
+		if reflect.DeepEqual(names, []string{"call_tool", "describe_tool", "hidden", "search_tools"}) {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -507,9 +507,9 @@ func TestProxyPassesThroughMissingEntryAndReloadsWhenItAppears(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 	writeRules(`{"mcpServers":{"test":{"allow":["visible"],"metadata":{"tools":{"visible":{"title":"Only this tool"}}}}}}`)
-	waitForToolNames(t, ctx, session, []string{"visible"})
+	waitForToolNames(t, ctx, session, []string{"call_tool", "describe_tool", "search_tools", "visible"})
 	tools, err := session.ListTools(ctx, nil)
-	if err != nil || tools.Tools[0].Title != "Only this tool" {
+	if err != nil || tools.Tools[3].Title != "Only this tool" {
 		t.Fatalf("entry metadata was not applied: %#v, %v", tools, err)
 	}
 
@@ -537,7 +537,7 @@ func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	if names := listedToolNames(t, ctx, session); len(names) != 1 || names[0] != "visible" {
+	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"call_tool", "describe_tool", "search_tools", "visible"}) {
 		t.Fatalf("unexpected initial tools: %#v", names)
 	}
 
@@ -546,17 +546,17 @@ func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
 	if err := os.WriteFile(localPath, []byte(`{"mcpServers":{"test":{"allow":["hidden"]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	waitForToolNames(t, ctx, session, []string{"hidden"})
+	waitForToolNames(t, ctx, session, []string{"call_tool", "describe_tool", "hidden", "search_tools"})
 	if err := os.Remove(localPath); err != nil {
 		t.Fatal(err)
 	}
-	waitForToolNames(t, ctx, session, []string{"visible"})
+	waitForToolNames(t, ctx, session, []string{"call_tool", "describe_tool", "search_tools", "visible"})
 	if err := os.WriteFile(localPath, []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A broken edit is ignored; the most recently valid rules remain published.
 	time.Sleep(250 * time.Millisecond)
-	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"visible"}) {
+	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"call_tool", "describe_tool", "search_tools", "visible"}) {
 		t.Fatalf("invalid local rules replaced the active tool list: %#v", names)
 	}
 }
