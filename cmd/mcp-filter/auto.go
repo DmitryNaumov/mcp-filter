@@ -220,7 +220,7 @@ func helperTool(name, description string, properties map[string]any, required ..
 }
 
 func (s *toolState) addHelpers() {
-	s.server.AddTool(helperTool("search_tools", "Find available tools by name or description. Returns short summaries without activating tools.", map[string]any{"query": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 10}}, "query"), s.search)
+	s.server.AddTool(helperTool("search_tools", "The visible tool list may contain only a subset of this server's tools. When you need a capability you do not see, search for it here. Search returns short summaries without activating tools; use describe_tool or call_tool on a result to activate it.", map[string]any{"query": map[string]any{"type": "string", "description": "Tool name or words describing the capability you need."}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 10}}, "query"), s.search)
 	s.server.AddTool(helperTool("describe_tool", "Get a tool's complete schema and activate it for this connection.", map[string]any{"name": map[string]any{"type": "string"}}, "name"), s.describe)
 	s.server.AddTool(helperTool("call_tool", "Invoke an available tool by name using arguments that match its schema. This may activate the tool.", map[string]any{"name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "name", "arguments"), s.call)
 }
