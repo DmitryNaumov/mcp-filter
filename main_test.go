@@ -439,6 +439,76 @@ func TestProxyTimesOutUpstreamToolCall(t *testing.T) {
 	}
 }
 
+func TestProxyLogsMalformedUpstreamToolResponse(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".mcp-filter.json")
+	contents := `{"logging":{"directory":"logs","level":"info","format":"json"},"mcpServers":{"test":{"allow":["corrupt"]}}}`
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"test", "--config", configPath, "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream", "errors",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "logging-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	_, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "corrupt", Arguments: map[string]any{}})
+	if err == nil || !strings.Contains(err.Error(), "invalid trailing data at the end of stream") {
+		t.Fatalf("expected malformed upstream stream error, got %v", err)
+	}
+	logContents, err := os.ReadFile(filepath.Join(dir, "logs", "test.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logContents), `"msg":"upstream tool call failed"`) ||
+		!strings.Contains(string(logContents), `"tool":"corrupt"`) ||
+		!strings.Contains(string(logContents), "invalid trailing data at the end of stream") {
+		t.Fatalf("missing upstream call error in log: %s", logContents)
+	}
+}
+
+func TestProxyLogsUpstreamToolErrorResultWithoutContent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".mcp-filter.json")
+	contents := `{"logging":{"directory":"logs","level":"error","format":"json"},"mcpServers":{"test":{"allow":["failure"]}}}`
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"test", "--config", configPath, "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream", "errors",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "logging-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "failure", Arguments: map[string]any{}})
+	if err != nil || result == nil || !result.IsError || result.Content[0].(*mcp.TextContent).Text != "private issue details" {
+		t.Fatalf("upstream error result changed: %#v, %v", result, err)
+	}
+	logContents, err := os.ReadFile(filepath.Join(dir, "logs", "test.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logContents), `"msg":"upstream tool returned error"`) ||
+		!strings.Contains(string(logContents), `"tool":"failure"`) ||
+		strings.Contains(string(logContents), "private issue details") {
+		t.Fatalf("unexpected upstream error log: %s", logContents)
+	}
+}
+
 func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
 	writeRules := func(allow string) {
@@ -627,7 +697,7 @@ func TestMCPFilterHelperProcess(t *testing.T) {
 	var err error
 	switch args[0] {
 	case "upstream":
-		err = runE2EUpstream(context.Background())
+		err = runE2EUpstream(context.Background(), len(args) > 1 && args[1] == "errors")
 	default:
 		err = proxy(context.Background(), args)
 	}
@@ -647,7 +717,7 @@ func helperArguments() []string {
 	return nil
 }
 
-func runE2EUpstream(ctx context.Context) error {
+func runE2EUpstream(ctx context.Context, includeErrorTools bool) error {
 	server := mcp.NewServer(&mcp.Implementation{Name: "fake-upstream", Version: "1"}, nil)
 	server.AddTool(&mcp.Tool{Name: "visible", InputSchema: map[string]any{"type": "object"}}, func(_ context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var arguments struct {
@@ -669,6 +739,15 @@ func runE2EUpstream(ctx context.Context) error {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "too late"}}}, nil
 		}
 	})
+	if includeErrorTools {
+		server.AddTool(&mcp.Tool{Name: "corrupt", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","method":"notifications/message"} trailing`)
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "unreachable"}}}, nil
+		})
+		server.AddTool(&mcp.Tool{Name: "failure", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "private issue details"}}}, nil
+		})
+	}
 	server.AddPrompt(&mcp.Prompt{Name: "status", Description: "original prompt"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		return &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{Role: mcp.Role("user"), Content: &mcp.TextContent{Text: "status"}}}}, nil
 	})

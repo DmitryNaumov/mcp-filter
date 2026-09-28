@@ -178,6 +178,11 @@ func (s *toolState) forward(ctx context.Context, name string, args any, validate
 		defer cancel()
 	}
 	result, err := s.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		slog.Error("upstream tool call failed", "entry", s.entryName, "tool", name, "trigger", trigger, "error", err)
+	} else if result != nil && result.IsError {
+		slog.Error("upstream tool returned error", "entry", s.entryName, "tool", name, "trigger", trigger)
+	}
 	return result, err
 }
 
