@@ -474,6 +474,33 @@ func TestProxyLogsMalformedUpstreamToolResponse(t *testing.T) {
 	}
 }
 
+func TestProxyAcceptsPaddedUpstreamToolResponse(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"test":{"allow":["padded"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyCommand := exec.Command(
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--",
+		"test", "--config", configPath, "--",
+		os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream", "errors",
+	)
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "padded-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "padded", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) != 1 || result.Content[0].(*mcp.TextContent).Text != "ok" {
+		t.Fatalf("unexpected forwarded result: %#v", result)
+	}
+}
+
 func TestProxyLogsUpstreamToolErrorResultWithoutContent(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mcp-filter.json")
@@ -818,6 +845,10 @@ func runE2EUpstream(ctx context.Context, includeErrorTools bool) error {
 		}
 	})
 	if includeErrorTools {
+		server.AddTool(&mcp.Tool{Name: "padded", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","method":"notifications/message","params":{}}    `)
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+		})
 		server.AddTool(&mcp.Tool{Name: "corrupt", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","method":"notifications/message"} trailing`)
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "unreachable"}}}, nil

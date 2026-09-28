@@ -503,7 +503,7 @@ func newTransport(opts proxyOptions, command []string) (mcp.Transport, error) {
 	case "stdio":
 		cmd := exec.Command(command[0], command[1:]...)
 		cmd.Stderr = os.Stderr
-		return &mcp.CommandTransport{Command: cmd}, nil
+		return &normalizedCommandTransport{command: cmd}, nil
 	case "streamable-http":
 		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
 	case "auto":
