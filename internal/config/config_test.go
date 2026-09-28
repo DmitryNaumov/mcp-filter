@@ -92,3 +92,52 @@ func TestMergeLocalOverridesDeny(t *testing.T) {
 		t.Fatalf("bad merge: %#v", entry)
 	}
 }
+
+func TestEnabledOverridesAndGlobalKillSwitch(t *testing.T) {
+	no, yes := false, true
+	base := Config{MCPServers: map[string]Entry{
+		"tracker": {Enabled: &no, Allow: []string{"get"}},
+		"docs":    {Allow: []string{"search"}},
+	}}
+	local := Config{MCPServers: map[string]Entry{"tracker": {Enabled: &yes}, "docs": {Enabled: &no}}}
+	merged := merge(base, local)
+	if entry, ok := merged.EffectiveEntry("tracker"); !ok || !entry.Allowed("get") {
+		t.Fatalf("local true did not restore base rules: %#v, %v", entry, ok)
+	}
+	if _, ok := merged.EffectiveEntry("docs"); ok {
+		t.Fatal("local false did not disable docs")
+	}
+	if _, ok := merged.EffectiveEntry("missing"); ok {
+		t.Fatal("missing entry unexpectedly configured")
+	}
+	local.Enabled = &no
+	merged = merge(base, local)
+	if _, ok := merged.EffectiveEntry("tracker"); ok {
+		t.Fatal("per-server true overrode global false")
+	}
+	if entry, ok := merged.Lookup("tracker"); !ok || !entry.Allowed("get") {
+		t.Fatal("disabled entry lost stored rules")
+	}
+	local.Enabled = &yes
+	if _, ok := merge(base, local).EffectiveEntry("tracker"); !ok {
+		t.Fatal("local global true did not re-enable filtering")
+	}
+}
+
+func TestLoadPathAcceptsEnabledFlags(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, BaseFile)
+	if err := os.WriteFile(basePath, []byte(`{"enabled":false,"mcpServers":{"tracker":{"allow":["get"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, LocalFile), []byte(`{"enabled":true,"mcpServers":{"tracker":{"enabled":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadPath(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.EffectiveEntry("tracker"); ok {
+		t.Fatal("local per-server false was ignored")
+	}
+}

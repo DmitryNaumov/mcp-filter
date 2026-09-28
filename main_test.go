@@ -631,6 +631,84 @@ func TestProxyReloadsLocalAllowlistOverlay(t *testing.T) {
 	}
 }
 
+func TestProxyTogglesFilteringAndMetadataInOpenSession(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".mcp-filter.json")
+	localPath := filepath.Join(dir, ".mcp-filter.local.json")
+	base := `{"mcpServers":{"test":{"allow":["visible"],"deny":["hidden"],"metadata":{"tools":{"visible":{"description":"filtered tool"}},"patches":[{"method":"prompts/list","select":{"name":"status"},"patch":{"description":"filtered prompt"}},{"method":"resources/list","select":{"uri":"test://item"},"patch":{"description":"filtered resource"}}]}}}}`
+	if err := os.WriteFile(configPath, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyCommand := exec.Command(os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "test", "--config", configPath, "--", os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", "upstream")
+	proxyCommand.Env = append(os.Environ(), "MCP_FILTER_TEST_HELPER=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "toggle-client", Version: "1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: proxyCommand}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	waitForToolNames(t, ctx, session, []string{"call_tool", "describe_tool", "search_tools", "visible"})
+	waitForMetadata(t, ctx, session, "filtered tool", "filtered prompt", "filtered resource")
+
+	// Let the proxy install its filesystem watcher before creating the local file.
+	time.Sleep(150 * time.Millisecond)
+	if err := os.WriteFile(localPath, []byte(`{"mcpServers":{"test":{"enabled":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForToolNames(t, ctx, session, []string{"hidden", "slow", "visible"})
+	waitForMetadata(t, ctx, session, "", "original prompt", "original resource")
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "hidden", Arguments: map[string]any{}})
+	if err != nil || result.Content[0].(*mcp.TextContent).Text != "must not be exposed" {
+		t.Fatalf("disabled filter did not forward hidden tool: %#v, %v", result, err)
+	}
+
+	if err := os.WriteFile(localPath, []byte(`{"mcpServers":{"test":{"enabled":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForToolNames(t, ctx, session, []string{"call_tool", "describe_tool", "search_tools", "visible"})
+	waitForMetadata(t, ctx, session, "filtered tool", "filtered prompt", "filtered resource")
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "hidden", Arguments: map[string]any{}}); err == nil {
+		t.Fatal("denied tool remained callable after re-enabling")
+	}
+
+	if err := os.WriteFile(localPath, []byte(`{"enabled":false,"mcpServers":{"test":{"enabled":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForToolNames(t, ctx, session, []string{"hidden", "slow", "visible"})
+	if err := os.WriteFile(localPath, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if names := listedToolNames(t, ctx, session); !reflect.DeepEqual(names, []string{"hidden", "slow", "visible"}) {
+		t.Fatalf("invalid override changed the active catalog: %#v", names)
+	}
+}
+
+func waitForMetadata(t *testing.T, ctx context.Context, session *mcp.ClientSession, tool, prompt, resource string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		tools, toolsErr := session.ListTools(ctx, nil)
+		prompts, promptsErr := session.ListPrompts(ctx, nil)
+		resources, resourcesErr := session.ListResources(ctx, nil)
+		if toolsErr != nil || promptsErr != nil || resourcesErr != nil {
+			t.Fatalf("list metadata: tools=%v prompts=%v resources=%v", toolsErr, promptsErr, resourcesErr)
+		}
+		var toolDescription string
+		for _, item := range tools.Tools {
+			if item.Name == "visible" {
+				toolDescription = item.Description
+			}
+		}
+		if toolDescription == tool && prompts.Prompts[0].Description == prompt && resources.Resources[0].Description == resource {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("metadata did not reach the expected state")
+}
+
 func listedToolNames(t *testing.T, ctx context.Context, session *mcp.ClientSession) []string {
 	t.Helper()
 	list, err := session.ListTools(ctx, nil)

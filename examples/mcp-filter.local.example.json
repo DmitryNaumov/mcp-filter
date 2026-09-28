@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "tracker": { "enabled": false },
+    "remote-docs": { "enabled": false }
+  }
+}

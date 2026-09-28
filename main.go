@@ -115,17 +115,31 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 			Resources: &mcp.ResourceCapabilities{ListChanged: true},
 		},
 	})
-	if err := attachPassthroughPrimitives(ctx, server, session, entry); err != nil {
+	primitives, err := newPrimitiveState(ctx, server, session)
+	if err != nil {
+		return err
+	}
+	primitiveCatalog, err := primitives.prepare(entry)
+	if err != nil {
 		return err
 	}
 	state, err := newToolState(server, session, opts.entry, tools, entry, configured, opts.timeout)
 	if err != nil {
 		return err
 	}
+	primitives.apply(primitiveCatalog)
 	state.publishInitial()
 	go watchUpstreamTools(ctx, toolChanges, state)
 	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry, configured bool) error {
-		return state.reload(updated, configured)
+		prepared, err := primitives.prepare(updated)
+		if err != nil {
+			return err
+		}
+		if err := state.reload(updated, configured); err != nil {
+			return err
+		}
+		primitives.apply(prepared)
+		return nil
 	})
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
@@ -171,7 +185,12 @@ func validateUpstream(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, configured, session, tools, err := connect(ctx, opts, command)
+	cfg, err := loadConfig(opts.config)
+	if err != nil {
+		return err
+	}
+	entry, configured := cfg.Lookup(opts.entry)
+	_, _, session, tools, err := connectWithConfig(ctx, opts, command, cfg, nil)
 	if err != nil {
 		return err
 	}
@@ -314,7 +333,7 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 }
 
 func connectWithConfig(ctx context.Context, opts proxyOptions, command []string, cfg config.Config, onChange func(string)) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
-	entry, configured := cfg.Lookup(opts.entry)
+	entry, configured := cfg.EffectiveEntry(opts.entry)
 	if configured {
 		if err := entry.Validate(); err != nil {
 			return config.Entry{}, false, nil, nil, fmt.Errorf("entry %q: %w", opts.entry, err)
@@ -447,7 +466,7 @@ func watchRules(ctx context.Context, basePath, entryName string, apply func(conf
 				slog.Default().Error("reload rules", "path", basePath, "error", err)
 				continue
 			}
-			entry, configured := cfg.Lookup(entryName)
+			entry, configured := cfg.EffectiveEntry(entryName)
 			if configured {
 				if err := entry.Validate(); err != nil {
 					slog.Default().Error("reload rules entry invalid", "entry", entryName, "error", err)
@@ -587,62 +606,6 @@ func matchesSelector(candidate, selector map[string]any) bool {
 		}
 	}
 	return true
-}
-
-func attachPassthroughPrimitives(ctx context.Context, server *mcp.Server, session *mcp.ClientSession, entry config.Entry) error {
-	initialized := session.InitializeResult()
-	if initialized == nil || initialized.Capabilities == nil {
-		return nil
-	}
-	if initialized.Capabilities.Prompts != nil {
-		prompts, err := session.ListPrompts(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("list upstream prompts: %w", err)
-		}
-		for _, upstreamPrompt := range prompts.Prompts {
-			prompt, err := overlayMetadata("prompts/list", upstreamPrompt, entry.Metadata.Patches)
-			if err != nil {
-				return fmt.Errorf("apply metadata for prompt %q: %w", upstreamPrompt.Name, err)
-			}
-			name := upstreamPrompt.Name
-			server.AddPrompt(prompt, func(callCtx context.Context, request *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-				params := *request.Params
-				params.Name = name
-				return session.GetPrompt(callCtx, &params)
-			})
-		}
-	}
-	if initialized.Capabilities.Resources != nil {
-		resources, err := session.ListResources(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("list upstream resources: %w", err)
-		}
-		for _, upstreamResource := range resources.Resources {
-			resource, err := overlayMetadata("resources/list", upstreamResource, entry.Metadata.Patches)
-			if err != nil {
-				return fmt.Errorf("apply metadata for resource %q: %w", upstreamResource.URI, err)
-			}
-			server.AddResource(resource, func(callCtx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-				params := *request.Params
-				return session.ReadResource(callCtx, &params)
-			})
-		}
-		templates, err := session.ListResourceTemplates(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("list upstream resource templates: %w", err)
-		}
-		for _, upstreamTemplate := range templates.ResourceTemplates {
-			template, err := overlayMetadata("resources/templates/list", upstreamTemplate, entry.Metadata.Patches)
-			if err != nil {
-				return fmt.Errorf("apply metadata for resource template %q: %w", upstreamTemplate.URITemplate, err)
-			}
-			server.AddResourceTemplate(template, func(callCtx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-				params := *request.Params
-				return session.ReadResource(callCtx, &params)
-			})
-		}
-	}
-	return nil
 }
 
 func overlayMetadata[T any](method string, value *T, patches []config.Patch) (*T, error) {

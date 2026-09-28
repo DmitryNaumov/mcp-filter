@@ -3,9 +3,9 @@
   "$id": "https://mcp-filter.dev/schema/v1.json",
   "title": "mcp-filter rules",
   "type": "object",
-  "required": ["mcpServers"],
   "properties": {
     "$schema": { "type": "string" },
+    "enabled": { "type": "boolean" },
     "logging": {
       "type": "object",
       "properties": {
@@ -25,6 +25,7 @@
     "entry": {
       "type": "object",
       "properties": {
+        "enabled": { "type": "boolean" },
         "allow": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "deny": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "metadata": {

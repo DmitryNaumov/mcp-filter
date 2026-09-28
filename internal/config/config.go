@@ -16,6 +16,7 @@ const (
 
 type Config struct {
 	Schema     string           `json:"$schema"`
+	Enabled    *bool            `json:"enabled"`
 	Logging    *Logging         `json:"logging"`
 	MCPServers map[string]Entry `json:"mcpServers"`
 }
@@ -33,6 +34,7 @@ type Logging struct {
 }
 
 type Entry struct {
+	Enabled  *bool    `json:"enabled"`
 	Allow    []string `json:"allow"`
 	Deny     []string `json:"deny"`
 	Metadata Metadata `json:"metadata"`
@@ -173,12 +175,18 @@ func readOptional(path string) (Config, error) {
 }
 
 func merge(base, local Config) Config {
-	result := Config{Logging: mergeLogging(base.Logging, local.Logging), MCPServers: make(map[string]Entry, len(base.MCPServers)+len(local.MCPServers))}
+	result := Config{Enabled: base.Enabled, Logging: mergeLogging(base.Logging, local.Logging), MCPServers: make(map[string]Entry, len(base.MCPServers)+len(local.MCPServers))}
+	if local.Enabled != nil {
+		result.Enabled = local.Enabled
+	}
 	for name, entry := range base.MCPServers {
 		result.MCPServers[name] = entry
 	}
 	for name, override := range local.MCPServers {
 		current := result.MCPServers[name]
+		if override.Enabled != nil {
+			current.Enabled = override.Enabled
+		}
 		if override.Allow != nil {
 			current.Allow = override.Allow
 		}
@@ -271,6 +279,16 @@ func (c Config) Entry(name string) (Entry, error) {
 func (c Config) Lookup(name string) (Entry, bool) {
 	entry, ok := c.MCPServers[name]
 	return entry, ok
+}
+
+// EffectiveEntry returns the rules only when filtering is enabled. The stored
+// entry remains available through Lookup for validation and later re-enabling.
+func (c Config) EffectiveEntry(name string) (Entry, bool) {
+	entry, ok := c.Lookup(name)
+	if !ok || (c.Enabled != nil && !*c.Enabled) || (entry.Enabled != nil && !*entry.Enabled) {
+		return Entry{}, false
+	}
+	return entry, true
 }
 
 func (e Entry) Allowed(name string) bool {
