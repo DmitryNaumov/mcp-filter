@@ -14,7 +14,7 @@ Prompts, resources и resource templates передаются без фильт�
 
 Стартовый конфиг: [examples/.mcp-filter.json](examples/.mcp-filter.json). Для запуска вне корня проекта передайте явный путь: `mcp-filter tracker --config /path/.mcp-filter.json -- …`.
 
-`tracker` в командах ниже — имя MCP-сервера, то есть ключ в `mcpServers`. Проверка без запуска upstream: `mcp-filter validate tracker`. Для сверки allowlist с фактическим сервером: `mcp-filter validate --check-upstream tracker -- npx -y @acme/tracker-mcp`. `inspect` подключается к upstream и выводит tools со статусом `published`, `discoverable` или `hidden`; `mcp-filter version` печатает версию и время бинарника. Для сборок CI показывается точное время сборки; при обычном `go install` — время изменения файла, обычно совпадающее с установкой.
+`tracker` в командах ниже — имя MCP-сервера, то есть ключ в `mcpServers`. Проверка без запуска upstream: `mcp-filter validate tracker`. Для сверки allowlist с фактическим сервером: `mcp-filter validate --check-upstream tracker -- npx -y @acme/tracker-mcp`. `inspect` подключается к upstream и выводит tools со статусом `published`, `discoverable` или `hidden`; `mcp-filter version` печатает хэш и дату коммита исходного кода. При сборке из Git checkout выводится полный хэш; при `go install ...@latest` из pseudo-version — его 12-символьный префикс. Если бинарник собран из изменённого рабочего дерева, это отмечается отдельно. Если Go не включил сведения о коммите, вместо них выводится `unavailable`.
 
 По умолчанию вызов upstream-инструмента ограничен 120 секундами. Измените предел флагом `--timeout 30s`; `--timeout 0` отключает ограничение.
 

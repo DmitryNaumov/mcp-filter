@@ -13,6 +13,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -35,11 +37,10 @@ SERVER is the MCP server name: a key in mcpServers in .mcp-filter.json.
 Without that key, mcp-filter runs as a transparent pass-through.
 validate checks rules syntax and the allowlist; --check-upstream also verifies
 that allowed tools exist upstream. inspect lists tools that would be published.
-version prints the mcp-filter version and binary timestamp.`
+version prints the mcp-filter version, source commit and commit date.`
 )
 
-// Set by release builds with -ldflags "-X main.buildTime=...".
-var buildTime string
+var pseudoVersion = regexp.MustCompile(`[.-]([0-9]{14})-([0-9a-f]{12})(?:\+incompatible)?$`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -65,16 +66,55 @@ func main() {
 }
 
 func versionDetails() string {
-	if buildTime != "" {
-		return fmt.Sprintf("mcp-filter %s\nBuilt: %s", version, buildTime)
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return formatVersionDetails(nil)
 	}
-	executable, err := os.Executable()
-	if err == nil {
-		if info, statErr := os.Stat(executable); statErr == nil {
-			return fmt.Sprintf("mcp-filter %s\nBinary timestamp: %s (file modification time)", version, info.ModTime().UTC().Format(time.RFC3339))
+	return formatVersionDetails(info)
+}
+
+func formatVersionDetails(info *debug.BuildInfo) string {
+	revision, commitDate, modified := "", "", false
+	moduleVersion := ""
+	if info != nil {
+		moduleVersion = info.Main.Version
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.time":
+				commitDate = setting.Value
+			case "vcs.modified":
+				modified = setting.Value == "true"
+			}
+		}
+		if (revision == "" || commitDate == "") && strings.HasPrefix(moduleVersion, "v") {
+			if parts := pseudoVersion.FindStringSubmatch(moduleVersion); parts != nil {
+				if date, err := time.Parse("20060102150405", parts[1]); err == nil {
+					if revision == "" {
+						revision = parts[2]
+					}
+					if commitDate == "" {
+						commitDate = date.UTC().Format(time.RFC3339)
+					}
+				}
+			}
 		}
 	}
-	return fmt.Sprintf("mcp-filter %s\nBuild time: unavailable", version)
+	if revision == "" {
+		revision = "unavailable"
+	}
+	if commitDate == "" {
+		commitDate = "unavailable"
+	}
+	lines := []string{fmt.Sprintf("mcp-filter %s", version), "Commit: " + revision, "Commit date: " + commitDate}
+	if modified {
+		lines = append(lines, "Source modified: true")
+	}
+	if revision == "unavailable" && moduleVersion != "" && moduleVersion != "(devel)" {
+		lines = append(lines, "Module version: "+moduleVersion)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func proxy(ctx context.Context, args []string) (proxyErr error) {
