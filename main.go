@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DmitryNaumov/mcp-filter/internal/config"
 	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sourcecraft/mcp-filter/internal/config"
 )
 
 const (
@@ -85,7 +85,17 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 		}
 	}()
 	slog.Info("MCP proxy starting", "transport", opts.transport)
-	entry, configured, session, tools, err := connectWithConfig(ctx, opts, command, cfg)
+	toolChanges := make(chan struct{}, 1)
+	entry, configured, session, tools, err := connectWithConfig(ctx, opts, command, cfg, func(kind string) {
+		if kind != "tools" {
+			slog.Info("upstream MCP list changed; upstream refresh is pending implementation", "entry", opts.entry, "kind", kind)
+			return
+		}
+		select {
+		case toolChanges <- struct{}{}:
+		default:
+		}
+	})
 	if err != nil {
 		return err
 	}
@@ -113,6 +123,7 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 		return err
 	}
 	state.publishInitial()
+	go watchUpstreamTools(ctx, toolChanges, state)
 	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry, configured bool) error {
 		return state.reload(updated, configured)
 	})
@@ -299,19 +310,17 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 	if err != nil {
 		return config.Entry{}, false, nil, nil, err
 	}
-	return connectWithConfig(ctx, opts, command, cfg)
+	return connectWithConfig(ctx, opts, command, cfg, nil)
 }
 
-func connectWithConfig(ctx context.Context, opts proxyOptions, command []string, cfg config.Config) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
+func connectWithConfig(ctx context.Context, opts proxyOptions, command []string, cfg config.Config, onChange func(string)) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
 	entry, configured := cfg.Lookup(opts.entry)
 	if configured {
 		if err := entry.Validate(); err != nil {
 			return config.Entry{}, false, nil, nil, fmt.Errorf("entry %q: %w", opts.entry, err)
 		}
 	}
-	client := newUpstreamClient(func(kind string) {
-		slog.Default().Info("upstream MCP list changed; upstream refresh is pending implementation", "entry", opts.entry, "kind", kind)
-	})
+	client := newUpstreamClient(onChange)
 	transport, err := newTransport(opts, command)
 	if err != nil {
 		return config.Entry{}, false, nil, nil, err

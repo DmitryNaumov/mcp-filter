@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DmitryNaumov/mcp-filter/internal/config"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sourcecraft/mcp-filter/internal/config"
 )
 
 var helperNames = []string{"search_tools", "describe_tool", "call_tool"}
@@ -65,9 +65,35 @@ func (s *toolState) prepare(entry config.Entry, configured bool) error {
 				return fmt.Errorf("apply metadata for tool %q: %w", original.Name, err)
 			}
 		}
+		if err := validateToolSchemas(tool); err != nil {
+			return fmt.Errorf("tool %q: %w", original.Name, err)
+		}
 		tools[original.Name] = tool
 	}
 	s.tools = tools
+	return nil
+}
+
+func validateToolSchemas(tool *mcp.Tool) error {
+	for _, schema := range []struct {
+		name  string
+		value any
+	}{{"input schema", tool.InputSchema}, {"output schema", tool.OutputSchema}} {
+		if schema.value == nil && schema.name == "output schema" {
+			continue
+		}
+		encoded, err := json.Marshal(schema.value)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", schema.name, err)
+		}
+		var object map[string]any
+		if err := json.Unmarshal(encoded, &object); err != nil {
+			return fmt.Errorf("decode %s: %w", schema.name, err)
+		}
+		if object["type"] != "object" {
+			return fmt.Errorf("%s must have type object", schema.name)
+		}
+	}
 	return nil
 }
 
@@ -184,8 +210,45 @@ func (s *toolState) reload(entry config.Entry, configured bool) error {
 			delete(s.active, name)
 		}
 	}
+	s.reconcilePublished(oldTools)
+	if oldConfigured && !configured {
+		s.server.RemoveTools(helperNames...)
+	}
+	if configured && !oldConfigured {
+		s.addHelpers()
+	}
+	return nil
+}
+
+func (s *toolState) refreshUpstream(ctx context.Context) error {
+	var upstream []*mcp.Tool
+	for tool, err := range s.session.Tools(ctx, nil) {
+		if err != nil {
+			return fmt.Errorf("list upstream tools: %w", err)
+		}
+		upstream = append(upstream, tool)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	oldUpstream, oldTools := s.upstream, s.tools
+	s.upstream = upstream
+	if err := s.prepare(s.entry, s.configured); err != nil {
+		s.upstream, s.tools = oldUpstream, oldTools
+		return fmt.Errorf("prepare upstream tools: %w", err)
+	}
+	for name := range s.active {
+		if !s.candidate(name) {
+			delete(s.active, name)
+		}
+	}
+	s.reconcilePublished(oldTools)
+	return nil
+}
+
+// reconcilePublished runs with s.mu held, after the new catalog is prepared.
+func (s *toolState) reconcilePublished(oldTools map[string]*mcp.Tool) {
 	for name := range s.published {
-		if !s.visible(name) {
+		if !s.candidate(name) || !s.visible(name) {
 			s.server.RemoveTools(name)
 			delete(s.published, name)
 		}
@@ -200,13 +263,19 @@ func (s *toolState) reload(entry config.Entry, configured bool) error {
 			s.publish(name)
 		}
 	}
-	if oldConfigured && !configured {
-		s.server.RemoveTools(helperNames...)
+}
+
+func watchUpstreamTools(ctx context.Context, changes <-chan struct{}, state *toolState) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-changes:
+			if err := state.refreshUpstream(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("refresh upstream tools", "entry", state.entryName, "error", err)
+			}
+		}
 	}
-	if configured && !oldConfigured {
-		s.addHelpers()
-	}
-	return nil
 }
 
 func sameTool(a, b *mcp.Tool) bool {

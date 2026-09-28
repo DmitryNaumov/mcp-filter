@@ -1,5 +1,7 @@
 # mcp-filter
 
+Установка: `go install github.com/DmitryNaumov/mcp-filter@latest`.
+
 `mcp-filter` — локальный stdio MCP-прокси на Go. Он оборачивает отдельный «настоящий» MCP-сервер, показывает инструменты по правилам `allow` и `deny` и перенаправляет вызовы без изменения их аргументов и результата.
 
 Prompts, resources и resource templates передаются без фильтрации; их list metadata можно изменить через `metadata.patches`.
@@ -59,6 +61,8 @@ Prompts, resources и resource templates передаются без фильт�
 После раскрытия прокси отправляет `notifications/tools/list_changed`. Не все клиенты сразу предоставляют новый инструмент агенту: в проверенной версии Codex CLI список агента не обновлялся во время того же хода. Для таких клиентов используется всегда доступный `call_tool`. Клиент видит его как один широкий инструмент, который может вызвать любой инструмент вне `deny`. Настройте для него подтверждение каждого вызова; [пример Codex](examples/codex.config.toml) содержит `approval_mode = "approve"`. Не добавляйте `call_tool` в безусловно разрешённые инструменты Claude, если нужно подтверждать вызовы.
 
 Прокси всегда объявляет capability `listChanged` для tools, prompts и resources. Изменения `.mcp-filter.json` или `.mcp-filter.local.json` отслеживаются во время работы: allowlist и metadata tools перезагружаются с debounce, а подключённым клиентам отправляется `notifications/tools/list_changed`. Некорректная редакция не заменяет уже работающие правила. Если entry отсутствует в обоих rules-файлах, сервер работает прозрачным pass-through; добавление entry начинает фильтрацию без перезапуска, удаление возвращает pass-through.
+
+При `notifications/tools/list_changed` от upstream прокси повторно получает полный каталог инструментов, применяет текущие правила и metadata, обновляет опубликованные инструменты и уведомляет клиента. Ошибка чтения каталога или применения metadata сохраняет прежний список; причина записывается в лог. Обновление prompts и resources по upstream-уведомлениям пока не реализовано.
 
 Готовые обёртки: [Claude `.mcp.json`](examples/claude.mcp.json) и [Codex `config.toml`](examples/codex.config.toml). Имя entry обычно совпадает с ключом `mcpServers` в rules-конфиге; отсутствующий ключ намеренно означает pass-through.
 

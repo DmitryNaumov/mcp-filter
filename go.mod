@@ -1,4 +1,4 @@
-module github.com/sourcecraft/mcp-filter
+module github.com/DmitryNaumov/mcp-filter
 
 go 1.24.0
 

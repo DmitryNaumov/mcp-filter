@@ -3,9 +3,11 @@
 ## Dynamic upstream updates
 
 - [x] Принимать legacy `notifications/tools/list_changed`, `notifications/prompts/list_changed` и `notifications/resources/list_changed` от upstream.
-- [ ] После уведомления повторно запрашивать соответствующий list upstream и применять allowlist/metadata patches.
-- [ ] Атомарно добавлять, заменять и удалять локальные tool/prompt/resource handlers после refresh.
-- [ ] Отправлять downstream-клиенту соответствующее `*_list_changed` только после успешного refresh.
+- [x] После `notifications/tools/list_changed` повторно запрашивать полный список tools upstream и применять allowlist/metadata patches.
+- [ ] Обновлять prompts/resources после соответствующих upstream list notifications.
+- [ ] Атомарно добавлять, заменять и удалять локальные tool/prompt/resource handlers после refresh. Для tools новый каталог готовится до публикации, но SDK обновляет отдельные handlers последовательно.
+- [x] Отправлять downstream-клиенту `tools/list_changed` только после успешного refresh tools.
+- [ ] Отправлять downstream-клиенту `prompts/list_changed` и `resources/list_changed` только после успешного refresh.
 - [ ] Поддержать `notifications/resources/updated` и relay resource subscriptions.
 - [ ] После обновления Go и MCP SDK перейти на MCP 2026-07-28 `subscriptions/listen`; сохранить legacy notifications для старых upstream.
 - [x] Добавить file watcher для `.mcp-filter.json` и `.mcp-filter.local.json`: debounce, сохранение прежнего tool list при невалидной конфигурации, downstream `tools/list_changed` после успешного обновления.

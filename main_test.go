@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DmitryNaumov/mcp-filter/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sourcecraft/mcp-filter/internal/config"
 )
 
 func TestOverlayToolPreservesNameAndMergesMetadata(t *testing.T) {

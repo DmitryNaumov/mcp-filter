@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DmitryNaumov/mcp-filter/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sourcecraft/mcp-filter/internal/config"
 )
 
 func TestAutoDiscoveryActivationAndReload(t *testing.T) {
@@ -157,5 +157,140 @@ func TestAutoRejectsHelperCollision(t *testing.T) {
 	_, err := newToolState(server, nil, "test", []*mcp.Tool{{Name: "call_tool", InputSchema: map[string]any{"type": "object"}}}, config.Entry{}, true, 0)
 	if err == nil {
 		t.Fatal("helper collision accepted")
+	}
+}
+
+func TestUpstreamToolChangesRefreshPublishedCatalog(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "dynamic", Version: "1"}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
+	tool := func(name, description string) *mcp.Tool {
+		return &mcp.Tool{Name: name, Description: description, InputSchema: map[string]any{"type": "object"}}
+	}
+	handler := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+	}
+	upstream.AddTool(tool("a", "old"), handler)
+	uc, us := mcp.NewInMemoryTransports()
+	upstreamSession, err := upstream.Connect(ctx, us, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamSession.Close()
+	changes := make(chan struct{}, 1)
+	upstreamClient, err := newUpstreamClient(func(kind string) {
+		if kind == "tools" {
+			select {
+			case changes <- struct{}{}:
+			default:
+			}
+		}
+	}).Connect(ctx, uc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamClient.Close()
+	proxy := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "1"}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}})
+	entry := config.Entry{Allow: []string{"a", "b"}, Deny: []string{"secret"}, Metadata: config.Metadata{Tools: map[string]map[string]any{"b": {"description": "patched"}}}}
+	state, err := newToolState(proxy, upstreamClient, "test", []*mcp.Tool{tool("a", "old")}, entry, true, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.publishInitial()
+	go watchUpstreamTools(ctx, changes, state)
+	dc, ds := mcp.NewInMemoryTransports()
+	proxySession, err := proxy.Connect(ctx, ds, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxySession.Close()
+	downstreamChanges := make(chan struct{}, 10)
+	client, err := mcp.NewClient(&mcp.Implementation{Name: "downstream", Version: "1"}, &mcp.ClientOptions{ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+		downstreamChanges <- struct{}{}
+	}}).Connect(ctx, dc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	list := func() map[string]*mcp.Tool {
+		t.Helper()
+		result, err := client.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools := make(map[string]*mcp.Tool)
+		for _, item := range result.Tools {
+			tools[item.Name] = item
+		}
+		return tools
+	}
+	waitFor := func(check func(map[string]*mcp.Tool) bool) {
+		t.Helper()
+		for ctx.Err() == nil {
+			if check(list()) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("timed out waiting for refreshed tool list")
+	}
+	upstream.AddTool(tool("b", "upstream"), handler)
+	upstream.AddTool(tool("secret", "hidden"), handler)
+	waitFor(func(tools map[string]*mcp.Tool) bool { return tools["b"] != nil && tools["b"].Description == "patched" })
+	select {
+	case <-downstreamChanges:
+	case <-ctx.Done():
+		t.Fatal("missing downstream list change after successful refresh")
+	}
+	if list()["secret"] != nil {
+		t.Fatal("denied upstream tool was published")
+	}
+	upstream.RemoveTools("a", "b")
+	waitFor(func(tools map[string]*mcp.Tool) bool { return tools["a"] == nil && tools["b"] == nil })
+	if _, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "call_tool", Arguments: map[string]any{"name": "b", "arguments": map[string]any{}}}); err == nil {
+		t.Fatal("removed upstream tool remained callable")
+	}
+}
+
+func TestUpstreamRefreshFailurePreservesPublishedTools(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "dynamic", Version: "1"}, nil)
+	tool := &mcp.Tool{Name: "a", InputSchema: map[string]any{"type": "object"}}
+	upstream.AddTool(tool, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return nil, nil })
+	uc, us := mcp.NewInMemoryTransports()
+	upstreamSession, err := upstream.Connect(ctx, us, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamSession.Close()
+	client, err := mcp.NewClient(&mcp.Implementation{Name: "proxy", Version: "1"}, nil).Connect(ctx, uc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	proxy := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "1"}, nil)
+	entry := config.Entry{Allow: []string{"a", "b"}, Metadata: config.Metadata{Tools: map[string]map[string]any{"b": {"name": "renamed"}}}}
+	state, err := newToolState(proxy, client, "test", []*mcp.Tool{tool}, entry, true, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.publishInitial()
+	upstream.AddTool(&mcp.Tool{Name: "b", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return nil, nil })
+	if err := state.refreshUpstream(ctx); err == nil {
+		t.Fatal("invalid metadata patch was accepted")
+	}
+	if !state.published["a"] || state.published["b"] || state.tools["b"] != nil {
+		t.Fatal("failed refresh changed the published catalog")
+	}
+	entry.Metadata.Tools["b"] = map[string]any{"inputSchema": map[string]any{"type": "string"}}
+	if err := state.reload(entry, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.refreshUpstream(ctx); err == nil {
+		t.Fatal("invalid tool schema was accepted")
+	}
+	if !state.published["a"] || state.published["b"] || state.tools["b"] != nil {
+		t.Fatal("invalid tool schema changed the published catalog")
 	}
 }

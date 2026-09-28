@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/sourcecraft/mcp-filter/internal/config"
+	"github.com/DmitryNaumov/mcp-filter/internal/config"
 )
 
 // configureLogger installs the process logger. A filter process owns one
