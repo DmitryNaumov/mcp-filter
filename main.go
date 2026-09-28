@@ -35,8 +35,11 @@ SERVER is the MCP server name: a key in mcpServers in .mcp-filter.json.
 Without that key, mcp-filter runs as a transparent pass-through.
 validate checks rules syntax and the allowlist; --check-upstream also verifies
 that allowed tools exist upstream. inspect lists tools that would be published.
-version prints the mcp-filter build version.`
+version prints the mcp-filter version and binary timestamp.`
 )
+
+// Set by release builds with -ldflags "-X main.buildTime=...".
+var buildTime string
 
 func main() {
 	if len(os.Args) < 2 {
@@ -51,7 +54,7 @@ func main() {
 	case "inspect":
 		err = inspect(ctx, os.Args[2:])
 	case "version":
-		fmt.Println(version)
+		fmt.Println(versionDetails())
 		return
 	default:
 		err = proxy(ctx, os.Args[1:])
@@ -59,6 +62,19 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
+}
+
+func versionDetails() string {
+	if buildTime != "" {
+		return fmt.Sprintf("mcp-filter %s\nBuilt: %s", version, buildTime)
+	}
+	executable, err := os.Executable()
+	if err == nil {
+		if info, statErr := os.Stat(executable); statErr == nil {
+			return fmt.Sprintf("mcp-filter %s\nBinary timestamp: %s (file modification time)", version, info.ModTime().UTC().Format(time.RFC3339))
+		}
+	}
+	return fmt.Sprintf("mcp-filter %s\nBuild time: unavailable", version)
 }
 
 func proxy(ctx context.Context, args []string) (proxyErr error) {
