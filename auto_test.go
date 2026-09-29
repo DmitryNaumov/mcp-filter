@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +14,62 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+func TestDiscoveryHelpersAdvertiseWorkflow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	state := &toolState{server: server, tools: map[string]*mcp.Tool{}, configured: true}
+	state.addHelpers()
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client, err := mcp.NewClient(&mcp.Implementation{Name: "client", Version: "1"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	listed, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*mcp.Tool{}
+	for _, tool := range listed.Tools {
+		byName[tool.Name] = tool
+	}
+	search := byName["search_tools"]
+	if search == nil || !strings.Contains(search.Description, "hidden") || !strings.Contains(search.Description, `{"keywords":["issue","task"]}`) || !strings.Contains(search.Description, "describe_tool") {
+		t.Fatalf("search_tools does not explain discovery: %#v", search)
+	}
+	schema := search.InputSchema.(map[string]any)
+	if !reflect.DeepEqual(schema["required"], []any{"keywords"}) {
+		t.Fatalf("keywords is not required: %#v", schema["required"])
+	}
+	properties := schema["properties"].(map[string]any)
+	if len(properties) != 1 {
+		t.Fatalf("search should expose only keywords: %#v", properties)
+	}
+	keywords := properties["keywords"].(map[string]any)
+	if keywords["type"] != "array" || keywords["minItems"] != float64(1) || keywords["items"].(map[string]any)["type"] != "string" {
+		t.Fatalf("keywords must be a nonempty string array: %#v", keywords)
+	}
+	describe := byName["describe_tool"]
+	if describe == nil || !strings.Contains(describe.Description, "search_tools") || !strings.Contains(describe.Description, "input schema") || !strings.Contains(describe.Description, "activates") {
+		t.Fatalf("describe_tool does not explain its role: %#v", describe)
+	}
+	call := byName["call_tool"]
+	if call == nil || !strings.Contains(call.Description, "describe_tool") || !strings.Contains(call.Description, "hidden") || !strings.Contains(call.Description, "arguments") {
+		t.Fatalf("call_tool does not explain invocation: %#v", call)
+	}
+}
+
 func TestAutoDiscoveryActivationAndReload(t *testing.T) {
+	var logs bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1"}, nil)
@@ -79,12 +138,29 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 	call := func(name string, args any) (*mcp.CallToolResult, error) {
 		return client.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	}
-	result, err := call("search_tools", map[string]any{"query": "issue"})
+	result, err := call("search_tools", map[string]any{"keywords": []string{"issue"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if text := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "\"b\"") || strings.Contains(text, "\"c\"") {
 		t.Fatalf("search result %s", text)
+	}
+	result, err = call("search_tools", map[string]any{"keywords": []string{"missing", "issue", "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "\"b\"") || strings.Contains(text, "\"c\"") {
+		t.Fatalf("multi-keyword search result %s", text)
+	}
+	result, err = call("search_tools", map[string]any{"keywords": []string{"unmatched"}})
+	if err != nil || result.Content[0].(*mcp.TextContent).Text != "[]" {
+		t.Fatalf("empty search result: %#v, %v", result, err)
+	}
+	if _, err := call("search_tools", map[string]any{"keywords": []string{}}); err == nil {
+		t.Fatal("empty keyword list accepted")
+	}
+	if _, err := call("search_tools", map[string]any{"query": "issue"}); err == nil {
+		t.Fatal("obsolete query argument accepted")
 	}
 	if list() != initial {
 		t.Fatal("search activated tool")
@@ -112,7 +188,7 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 	if !strings.Contains(","+list()+",", ",b,") {
 		t.Fatal("activated tool not listed")
 	}
-	if _, err := call("call_tool", map[string]any{"name": "b", "arguments": map[string]any{"id": "123"}}); err != nil {
+	if _, err := call("call_tool", map[string]any{"name": "b", "arguments": map[string]any{"id": "private-id-123"}}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -149,6 +225,50 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 	newState.publishInitial()
 	if newState.active["b"] || newState.published["b"] {
 		t.Fatal("activation leaked into new connection")
+	}
+	if strings.Contains(logs.String(), "private-id-123") {
+		t.Fatal("forwarded tool arguments leaked into logs")
+	}
+	called := map[string]bool{}
+	results := map[string]bool{}
+	searchKeywordsLogged := false
+	describedToolLogged := false
+	calledToolLogged := false
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["msg"] == "helper tool called" {
+			toolName := event["tool"].(string)
+			called[toolName] = true
+			if event["entry"] != "test" {
+				t.Fatalf("helper call missing entry: %#v", event)
+			}
+			if toolName == "search_tools" && reflect.DeepEqual(event["keywords"], []any{"issue"}) {
+				searchKeywordsLogged = true
+			}
+			if toolName == "describe_tool" && event["target"] == "b" {
+				describedToolLogged = true
+			}
+			if toolName == "call_tool" && event["target"] == "b" {
+				calledToolLogged = true
+			}
+		}
+		if event["msg"] == "search_tools result" {
+			results[event["result"].(string)] = true
+		}
+	}
+	for _, name := range helperNames {
+		if !called[name] {
+			t.Fatalf("missing %s call log: %s", name, logs.String())
+		}
+	}
+	if !results[`[{"name":"b","summary":"Find an issue","activated":false}]`] || !results["[]"] {
+		t.Fatalf("missing search result logs: %s", logs.String())
+	}
+	if !searchKeywordsLogged || !describedToolLogged || !calledToolLogged {
+		t.Fatalf("helper call logs lack search keywords or target names: %s", logs.String())
 	}
 }
 

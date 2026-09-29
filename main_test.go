@@ -246,6 +246,26 @@ func TestConfigureLoggerWritesOneSafeFilePerEntry(t *testing.T) {
 	}
 }
 
+func TestDefaultLogLevelIncludesHelperCalls(t *testing.T) {
+	got, err := logLevel(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != slog.LevelInfo {
+		t.Fatalf("default log level = %v, want info", got)
+	}
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	closeLogger, err := configureLogger(config.Config{}, "", "tracker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeLogger()
+	if !slog.Default().Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("helper call logs are disabled without a logging section")
+	}
+}
+
 func TestProxyLogsStartupAndUpstreamFailure(t *testing.T) {
 	original := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(original) })

@@ -7,10 +7,10 @@ Let an agent discover and use tools omitted from the initial MCP catalog without
 - Every configured MCP server uses `allow` / `deny` / automatic discovery, without a separate mode. An omitted `allow` means an empty baseline; absent entries retain pass-through behavior.
 - `allow` tools are visible from startup, `deny` tools are never listed, described, activated, or called, and every other upstream tool is a discoverable candidate. Reject overlapping `allow` and `deny` names when loading rules.
 - Always publish `search_tools`, `describe_tool`, and `call_tool` for a configured entry. Reserve these names and reject upstream collisions.
-- `search_tools(query, limit)` returns at most ten deterministic matches with names, short summaries, and activation status. It does not activate tools. `describe_tool(name)` returns the selected tool's complete effective metadata and schema and activates it. `call_tool(name, arguments)` activates an auto candidate if necessary, then invokes it.
+- `search_tools(keywords)` accepts a nonempty array of short words and returns at most ten deterministic matches with names, short summaries, and activation status. Any keyword may match a tool name, title, or description. Search does not activate tools. `describe_tool(name)` returns the selected tool's complete effective metadata and schema and activates it. `call_tool(name, arguments)` activates an auto candidate if necessary, then invokes it.
 - Activation adds the original tool to the downstream `tools/list` for the lifetime of this MCP connection and emits `notifications/tools/list_changed`. Keep `call_tool` usable when a client does not refresh its model's tool set during a turn.
 - A successful activation is in memory only. It does not modify `.mcp-filter.json` or `.mcp-filter.local.json`. A reconnect starts with the configured baseline.
-- Log activation at `info` with entry, tool name, trigger (`describe_tool` or `call_tool`), and session/process identity. Never log arguments, results, schemas, or credentials.
+- Log helper calls and activation at `info` with entry and tool name. Log search keywords and the exact `search_tools` result. Do not log forwarded `call_tool` arguments or results, `describe_tool` schemas, or credentials.
 
 # Non-goals
 
@@ -41,7 +41,7 @@ Let an agent discover and use tools omitted from the initial MCP catalog without
 1. Extend configuration types, merge behavior, schema, validation, examples, and migration documentation for `deny` and implicit discovery.
 2. Move catalog selection and active-tool state into a synchronized per-connection component. Reconcile published tools on activation and rules reload; enforce policy again inside every handler.
 3. Add the three helper tools, lexical search, schema description, argument validation, and generic forwarding using the existing timeout path.
-4. Add structured activation and denial diagnostics without payload logging.
+4. Add structured helper call, search result, activation, and denial diagnostics without logging forwarded tool payloads.
 5. Cover policy, ranking, activation, notification, reload races, and reconnection with unit and MCP integration tests. Run live Claude and Codex CLI checks against an isolated fixture before enabling discovery in Postbox.
 
 # Verification

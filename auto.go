@@ -294,9 +294,22 @@ func helperTool(name, description string, properties map[string]any, required ..
 }
 
 func (s *toolState) addHelpers() {
-	s.server.AddTool(helperTool("search_tools", "The visible tool list may contain only a subset of this server's tools. When you need a capability you do not see, search for it here. Search returns short summaries without activating tools; use describe_tool or call_tool on a result to activate it.", map[string]any{"query": map[string]any{"type": "string", "description": "Tool name or words describing the capability you need."}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 10}}, "query"), s.search)
-	s.server.AddTool(helperTool("describe_tool", "Get a tool's complete schema and activate it for this connection.", map[string]any{"name": map[string]any{"type": "string"}}, "name"), s.describe)
-	s.server.AddTool(helperTool("call_tool", "Invoke an available tool by name using arguments that match its schema. This may activate the tool.", map[string]any{"name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "name", "arguments"), s.call)
+	s.server.AddTool(helperTool("search_tools", `Search this server's available tools, including tools hidden from the visible tool list. When you need a capability you cannot see, call with a few short alternatives, for example {"keywords":["issue","task"]}. A tool matches if at least one keyword occurs in its name, title, or description (case-insensitive literal substring). Returns up to 10 names, summaries, and activation states; [] means no match. Searching does not activate tools. Pass a result's exact name to describe_tool to get its input schema before calling it.`, map[string]any{
+		"keywords": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string", "minLength": 1},
+			"minItems":    1,
+			"description": "Required short alternative words likely in the hidden tool's name or description. Each word is searched independently; any match qualifies.",
+			"examples":    []any{[]string{"issue", "task"}},
+		},
+	}, "keywords"), s.search)
+	s.server.AddTool(helperTool("describe_tool", `Get the complete metadata and input schema of a tool found with search_tools. Pass its exact name, for example {"name":"get_issue"}. This activates the tool for this connection. Read the returned schema before using call_tool; some clients do not immediately show activated tools in their tool list.`, map[string]any{
+		"name": map[string]any{"type": "string", "minLength": 1, "description": "Exact name returned by search_tools."},
+	}, "name"), s.describe)
+	s.server.AddTool(helperTool("call_tool", `Invoke a tool by its exact name, including a hidden tool found with search_tools. First use describe_tool to learn its input schema. Then pass the result's name and an arguments object matching that schema. Calling a hidden tool activates it. This works even if the client does not show newly activated tools directly.`, map[string]any{
+		"name":      map[string]any{"type": "string", "minLength": 1, "description": "Exact tool name returned by search_tools or describe_tool."},
+		"arguments": map[string]any{"type": "object", "description": "Arguments required by the selected tool's input schema. Use {} only when that schema permits it."},
+	}, "name", "arguments"), s.call)
 }
 
 func decodeHelper(request *mcp.CallToolRequest, target any) error {
@@ -313,22 +326,20 @@ func textResult(value any) (*mcp.CallToolResult, error) {
 
 func (s *toolState) search(_ context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var input struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
+		Keywords []string `json:"keywords"`
 	}
 	if err := decodeHelper(request, &input); err != nil {
 		return nil, err
 	}
-	query := strings.ToLower(strings.TrimSpace(input.Query))
-	if query == "" {
-		return nil, fmt.Errorf("query is required")
+	slog.Info("helper tool called", "entry", s.entryName, "tool", "search_tools", "keywords", input.Keywords)
+	if len(input.Keywords) == 0 {
+		return nil, fmt.Errorf("keywords must contain at least one search word, for example {\"keywords\":[\"issue\",\"task\"]}")
 	}
-	limit := input.Limit
-	if limit == 0 {
-		limit = 10
-	}
-	if limit < 1 || limit > 10 {
-		return nil, fmt.Errorf("limit must be between 1 and 10")
+	for i, keyword := range input.Keywords {
+		input.Keywords[i] = strings.ToLower(strings.TrimSpace(keyword))
+		if input.Keywords[i] == "" {
+			return nil, fmt.Errorf("keywords must not contain empty words")
+		}
 	}
 	type hit struct {
 		Name      string `json:"name"`
@@ -343,15 +354,24 @@ func (s *toolState) search(_ context.Context, request *mcp.CallToolRequest) (*mc
 			continue
 		}
 		haystack := strings.ToLower(name + " " + tool.Title + " " + tool.Description)
-		if !strings.Contains(haystack, query) {
+		score := 0
+		for _, keyword := range input.Keywords {
+			if !strings.Contains(haystack, keyword) {
+				continue
+			}
+			matchScore := 1
+			if strings.Contains(strings.ToLower(name), keyword) {
+				matchScore = 2
+			}
+			if strings.EqualFold(name, keyword) {
+				matchScore = 3
+			}
+			if matchScore > score {
+				score = matchScore
+			}
+		}
+		if score == 0 {
 			continue
-		}
-		score := 1
-		if strings.Contains(strings.ToLower(name), query) {
-			score = 2
-		}
-		if strings.EqualFold(name, query) {
-			score = 3
 		}
 		summary := strings.TrimSpace(tool.Description)
 		if runes := []rune(summary); len(runes) > 160 {
@@ -366,13 +386,18 @@ func (s *toolState) search(_ context.Context, request *mcp.CallToolRequest) (*mc
 		}
 		return hits[i].Name < hits[j].Name
 	})
-	if len(hits) > limit {
-		hits = hits[:limit]
+	if len(hits) > 10 {
+		hits = hits[:10]
 	}
 	if hits == nil {
 		hits = []hit{}
 	}
-	return textResult(hits)
+	result, err := textResult(hits)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("search_tools result", "entry", s.entryName, "result", result.Content[0].(*mcp.TextContent).Text)
+	return result, nil
 }
 
 func (s *toolState) describe(_ context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -382,6 +407,7 @@ func (s *toolState) describe(_ context.Context, request *mcp.CallToolRequest) (*
 	if err := decodeHelper(request, &input); err != nil {
 		return nil, err
 	}
+	slog.Info("helper tool called", "entry", s.entryName, "tool", "describe_tool", "target", input.Name)
 	tool, err := s.activate(input.Name, "describe_tool")
 	if err != nil {
 		return nil, err
@@ -397,6 +423,7 @@ func (s *toolState) call(ctx context.Context, request *mcp.CallToolRequest) (*mc
 	if err := decodeHelper(request, &input); err != nil {
 		return nil, err
 	}
+	slog.Info("helper tool called", "entry", s.entryName, "tool", "call_tool", "target", input.Name)
 	if input.Arguments == nil {
 		input.Arguments = map[string]any{}
 	}

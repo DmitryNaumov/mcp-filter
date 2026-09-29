@@ -17,7 +17,7 @@ import (
 func configureLogger(cfg config.Config, configPath, entry string) (func() error, error) {
 	logging := cfg.Logging
 	if logging == nil {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 		return func() error { return nil }, nil
 	}
 	if logging.Directory == nil || strings.TrimSpace(*logging.Directory) == "" {
@@ -57,7 +57,7 @@ func configureLogger(cfg config.Config, configPath, entry string) (func() error,
 
 func logLevel(value *string) (slog.Level, error) {
 	if value == nil || *value == "" {
-		return slog.LevelWarn, nil
+		return slog.LevelInfo, nil
 	}
 	switch *value {
 	case "error":
