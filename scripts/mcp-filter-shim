@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Use mcp-filter when installed; otherwise run the stdio upstream after --.
+set -euo pipefail
+
+if filter=$(command -v mcp-filter 2>/dev/null) && [[ -f $filter && -x $filter ]]; then
+    exec "$filter" "$@"
+fi
+
+while [[ $# -gt 0 && $1 != -- ]]; do
+    shift
+done
+if [[ $# -eq 0 || $# -eq 1 ]]; then
+    printf '%s\n' 'mcp-filter-shim: no upstream command after --' >&2
+    exit 2
+fi
+shift
+exec "$@"
