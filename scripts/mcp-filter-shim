@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Use mcp-filter when installed; otherwise run the stdio upstream after --.
+# Install mcp-filter: go install github.com/DmitryNaumov/mcp-filter@latest
 set -euo pipefail
 
 if filter=$(command -v mcp-filter 2>/dev/null) && [[ -f $filter && -x $filter ]]; then
