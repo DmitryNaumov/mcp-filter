@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -186,7 +187,7 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 	primitives.apply(primitiveCatalog)
 	state.publishInitial()
 	go watchUpstreamTools(ctx, toolChanges, state)
-	go watchRules(ctx, configPath, opts.entry, func(updated config.Entry, configured bool) error {
+	go watchRules(ctx, configPath, opts.entry, cfg, func(updated config.Entry, configured bool) error {
 		prepared, err := primitives.prepare(updated)
 		if err != nil {
 			return err
@@ -472,68 +473,137 @@ func resolveConfigPath(path string) (string, error) {
 	return config.ResolvePath(".")
 }
 
-func watchRules(ctx context.Context, basePath, entryName string, apply func(config.Entry, bool) error) {
+func watchRules(ctx context.Context, basePath, entryName string, initial config.Config, apply func(config.Entry, bool) error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Default().Error("start rules watcher", "error", err)
+		watchRulesLoop(ctx, basePath, entryName, initial, nil, nil, time.Second, time.Minute, apply)
 		return
 	}
-	defer watcher.Close()
 	directory := filepath.Dir(basePath)
 	if err := watcher.Add(directory); err != nil {
 		slog.Default().Error("watch rules directory", "error", err)
+		watcher.Close()
+		watchRulesLoop(ctx, basePath, entryName, initial, nil, nil, time.Second, time.Minute, apply)
 		return
 	}
-	baseName := filepath.Base(basePath)
-	pending := false
+	defer watcher.Close()
+	watchRulesLoop(ctx, basePath, entryName, initial, watcher.Events, watcher.Errors, time.Second, time.Minute, apply)
+}
+
+type rulesHash struct {
+	base         [32]byte
+	local        [32]byte
+	localPresent bool
+}
+
+func readRulesHash(basePath string) (rulesHash, error) {
+	base, err := os.ReadFile(basePath)
+	if err != nil {
+		return rulesHash{}, err
+	}
+	result := rulesHash{base: sha256.Sum256(base)}
+	local, err := os.ReadFile(filepath.Join(filepath.Dir(basePath), config.LocalFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return result, nil
+	}
+	if err != nil {
+		return rulesHash{}, err
+	}
+	result.local = sha256.Sum256(local)
+	result.localPresent = true
+	return result, nil
+}
+
+func watchRulesLoop(ctx context.Context, basePath, entryName string, initial config.Config, events <-chan fsnotify.Event, watcherErrors <-chan error, debounce, pollInterval time.Duration, apply func(config.Entry, bool) error) {
+	lastEntry, lastConfigured := initial.EffectiveEntry(entryName)
+	var lastHash rulesHash
+	hashKnown := false
+	check := func() {
+		hash, err := readRulesHash(basePath)
+		if err != nil {
+			slog.Default().Error("read rules content", "path", basePath, "error", err)
+			return
+		}
+		if hashKnown && hash == lastHash {
+			return
+		}
+		cfg, err := config.LoadPath(basePath)
+		if err != nil {
+			slog.Default().Error("reload rules", "path", basePath, "error", err)
+			return
+		}
+		entry, configured := cfg.EffectiveEntry(entryName)
+		if configured != lastConfigured || !reflect.DeepEqual(entry, lastEntry) {
+			if configured {
+				if err := entry.Validate(); err != nil {
+					slog.Default().Error("reload rules entry invalid", "entry", entryName, "error", err)
+					return
+				}
+			}
+			if err := apply(entry, configured); err != nil {
+				slog.Default().Error("apply reloaded rules", "entry", entryName, "error", err)
+				return
+			}
+			lastEntry, lastConfigured = entry, configured
+			slog.Default().Info("reloaded MCP filter rules", "entry", entryName)
+		}
+		lastHash, hashKnown = hash, true
+	}
+	// Reconcile a change that happened between the initial load and subscription.
+	check()
+	poll := time.NewTicker(pollInterval)
+	defer poll.Stop()
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C
 	}
 	defer timer.Stop()
-
-	queueReload := func() {
-		if pending {
-			return
-		}
+	pending := false
+	baseName := filepath.Base(basePath)
+	allErrors := watcherErrors
+	queueCheck := func() {
+		timer.Stop()
+		timer.Reset(debounce)
 		pending = true
-		timer.Reset(100 * time.Millisecond)
 	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case event, ok := <-watcher.Events:
+		case event, ok := <-events:
 			if !ok {
-				return
+				events = nil
+				continue
 			}
 			name := filepath.Base(event.Name)
-			if name == baseName || name == config.LocalFile {
-				queueReload()
+			if name != baseName && name != config.LocalFile {
+				continue
 			}
-		case err, ok := <-watcher.Errors:
-			if ok {
-				slog.Default().Error("watch rules", "error", err)
+			// Each new event starts a fresh quiet period.
+			queueCheck()
+		case err, ok := <-watcherErrors:
+			if !ok {
+				watcherErrors, allErrors = nil, nil
+				continue
 			}
+			slog.Default().Error("watch rules", "error", err)
+			// Fall back to the hash poll if a faulty watcher floods errors.
+			watcherErrors = nil
 		case <-timer.C:
 			pending = false
-			cfg, err := config.LoadPath(basePath)
-			if err != nil {
-				slog.Default().Error("reload rules", "path", basePath, "error", err)
-				continue
-			}
-			entry, configured := cfg.EffectiveEntry(entryName)
-			if configured {
-				if err := entry.Validate(); err != nil {
-					slog.Default().Error("reload rules entry invalid", "entry", entryName, "error", err)
-					continue
+			check()
+		case <-poll.C:
+			watcherErrors = allErrors
+			if !pending {
+				hash, err := readRulesHash(basePath)
+				if err != nil {
+					slog.Default().Error("read rules content", "path", basePath, "error", err)
+				} else if !hashKnown || hash != lastHash {
+					queueCheck()
 				}
 			}
-			if err := apply(entry, configured); err != nil {
-				slog.Default().Error("apply reloaded rules", "entry", entryName, "error", err)
-				continue
-			}
-			slog.Default().Info("reloaded MCP filter rules", "entry", entryName)
 		}
 	}
 }

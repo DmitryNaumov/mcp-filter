@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/DmitryNaumov/mcp-filter/internal/config"
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -596,6 +598,137 @@ func TestProxyReloadsAllowlistWhenRulesFileChanges(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("allowlist was not reloaded; last tools: %#v", listedToolNames(t, ctx, session))
+}
+
+func TestWatchRulesIgnoresRepeatedUnchangedFileEvents(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	contents := []byte(`{"mcpServers":{"test":{"allow":["visible"]}}}`)
+	if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadPath(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var applied atomic.Int32
+	go watchRules(ctx, configPath, "test", initial, func(config.Entry, bool) error {
+		applied.Add(1)
+		return nil
+	})
+	// Allow the watcher to subscribe, then simulate duplicate notifications from
+	// a noisy filesystem without changing the effective rules.
+	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 12; i++ {
+		if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if got := applied.Load(); got != 0 {
+		t.Fatalf("unchanged rules were applied %d times", got)
+	}
+}
+
+func TestWatchRulesPollsWhenNoEventsArrive(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	write := func(allow string) {
+		t.Helper()
+		contents := []byte(`{"mcpServers":{"test":{"allow":["` + allow + `"]}}}`)
+		if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("visible")
+	initial, err := config.LoadPath(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changes := make(chan string, 1)
+	// No event is sent; only the shortened test poll can find the change.
+	go watchRulesLoop(ctx, configPath, "test", initial, make(chan fsnotify.Event), make(chan error), 20*time.Millisecond, 50*time.Millisecond, func(entry config.Entry, _ bool) error {
+		changes <- entry.Allow[0]
+		return nil
+	})
+	time.Sleep(150 * time.Millisecond)
+	write("hidden")
+	select {
+	case got := <-changes:
+		if got != "hidden" {
+			t.Fatalf("poll applied %q, want hidden", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("content change was not found without fsnotify events")
+	}
+	localPath := filepath.Join(filepath.Dir(configPath), config.LocalFile)
+	if err := os.WriteFile(localPath, []byte(`{"mcpServers":{"test":{"allow":["slow"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-changes:
+		if got != "slow" {
+			t.Fatalf("poll applied %q from local override, want slow", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("local override change was not found without fsnotify events")
+	}
+}
+
+func TestWatchRulesLimitsReloadsDuringContinuousChanges(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".mcp-filter.json")
+	write := func(allow string) {
+		t.Helper()
+		contents := []byte(`{"mcpServers":{"test":{"allow":["` + allow + `"]}}}`)
+		if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("visible")
+	initial, err := config.LoadPath(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var applied atomic.Int32
+	latest := make(chan string, 10)
+	go watchRules(ctx, configPath, "test", initial, func(entry config.Entry, _ bool) error {
+		applied.Add(1)
+		latest <- entry.Allow[0]
+		return nil
+	})
+	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 12; i++ {
+		if i%2 == 0 {
+			write("hidden")
+		} else {
+			write("visible")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	write("slow")
+	if got := applied.Load(); got != 0 {
+		t.Fatalf("applied %d changes before the event burst became quiet", got)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if got := applied.Load(); got != 0 {
+		t.Fatalf("applied %d changes before one quiet second elapsed", got)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case allow := <-latest:
+			if allow == "slow" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("final rules were not applied after the event burst")
+		}
+	}
 }
 
 func TestProxyPassesThroughMissingEntryAndReloadsWhenItAppears(t *testing.T) {
