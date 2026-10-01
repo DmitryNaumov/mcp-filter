@@ -19,9 +19,11 @@ import (
 // while some stdio upstreams pad responses with spaces before that newline.
 type normalizedCommandTransport struct {
 	command *exec.Cmd
+	startup *startupAttempt
 }
 
 func (t *normalizedCommandTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	t.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := t.command.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -33,12 +35,16 @@ func (t *normalizedCommandTransport) Connect(ctx context.Context) (mcp.Connectio
 	if err := t.command.Start(); err != nil {
 		return nil, err
 	}
+	if t.startup != nil {
+		t.startup.started(t.command.Process)
+		t.startup.setPhase("initialize")
+	}
 	reader := &trimmedLineReader{source: bufio.NewReader(stdout)}
 	connection, err := (&mcp.IOTransport{Reader: io.NopCloser(reader), Writer: stdin}).Connect(ctx)
 	if err != nil {
 		stdin.Close()
-		t.command.Process.Kill()
-		t.command.Wait()
+		terminateProcessGroup(t.command.Process.Pid)
+		go t.command.Wait()
 		return nil, err
 	}
 	return &commandConnection{Connection: connection, command: t.command}, nil
@@ -98,13 +104,13 @@ func (c *commandConnection) Close() error {
 			c.err = errors.Join(closeErr, waitErr)
 			return
 		}
-		if err := c.command.Process.Signal(syscall.SIGTERM); err == nil {
+		if err := syscall.Kill(-c.command.Process.Pid, syscall.SIGTERM); err == nil {
 			if waitErr, done := wait(); done {
 				c.err = errors.Join(closeErr, waitErr)
 				return
 			}
 		}
-		if err := c.command.Process.Kill(); err != nil {
+		if err := syscall.Kill(-c.command.Process.Pid, syscall.SIGKILL); err != nil {
 			c.err = errors.Join(closeErr, err)
 			return
 		}

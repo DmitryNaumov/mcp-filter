@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -143,7 +145,7 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 	}()
 	slog.Info("MCP proxy starting", "transport", opts.transport)
 	toolChanges := make(chan struct{}, 1)
-	entry, configured, session, tools, err := connectWithConfig(ctx, opts, command, cfg, func(kind string) {
+	entry, configured, session, tools, err := connectWithStartup(ctx, opts, command, cfg, func(kind string) {
 		if kind != "tools" {
 			slog.Info("upstream MCP list changed; upstream refresh is pending implementation", "entry", opts.entry, "kind", kind)
 			return
@@ -247,7 +249,7 @@ func validateUpstream(ctx context.Context, args []string) error {
 		return err
 	}
 	entry, configured := cfg.Lookup(opts.entry)
-	_, _, session, tools, err := connectWithConfig(ctx, opts, command, cfg, nil)
+	_, _, session, tools, err := connectWithStartup(ctx, opts, command, cfg, nil)
 	if err != nil {
 		return err
 	}
@@ -277,7 +279,7 @@ func inspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, configured, session, tools, err := connect(ctx, opts, command)
+	entry, configured, session, tools, err := connectWithStartupConfig(ctx, opts, command, nil)
 	if err != nil {
 		return err
 	}
@@ -295,13 +297,16 @@ func inspect(ctx context.Context, args []string) error {
 }
 
 type proxyOptions struct {
-	entry     string
-	config    string
-	transport string
-	url       string
-	timeout   time.Duration
-	headers   headerFlags
-	headerEnv headerEnvFlags
+	entry          string
+	config         string
+	transport      string
+	url            string
+	timeout        time.Duration
+	startupTimeout time.Duration
+	startup        *startupAttempt
+	startupContext context.Context
+	headers        headerFlags
+	headerEnv      headerEnvFlags
 }
 
 type headerFlags []string
@@ -336,10 +341,14 @@ func parseProxyFlags(args []string) (proxyOptions, []string, error) {
 	fs.StringVar(&opts.transport, "transport", "", "upstream transport: stdio, auto, streamable-http, or sse")
 	fs.StringVar(&opts.url, "url", "", "upstream HTTP endpoint")
 	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "maximum duration of one upstream tool call; 0 disables the limit")
+	fs.DurationVar(&opts.startupTimeout, "startup-timeout", 15*time.Second, "maximum total upstream startup duration (launch, initialize, tools/list); 0 disables the limit")
 	fs.Var(&opts.headers, "header", "upstream HTTP header NAME=VALUE (repeatable)")
 	fs.Var(&opts.headerEnv, "header-env", "upstream HTTP header from environment HEADER=ENVIRONMENT_VARIABLE (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return proxyOptions{}, nil, err
+	}
+	if opts.startupTimeout < 0 {
+		return proxyOptions{}, nil, errors.New("startup-timeout must be nonnegative")
 	}
 	if positionalEntry != "" {
 		if opts.entry != "" && opts.entry != positionalEntry {
@@ -389,6 +398,97 @@ func connect(ctx context.Context, opts proxyOptions, command []string) (config.E
 	return connectWithConfig(ctx, opts, command, cfg, nil)
 }
 
+func connectWithStartupConfig(ctx context.Context, opts proxyOptions, command []string, onChange func(string)) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
+	cfg, err := loadConfig(opts.config)
+	if err != nil {
+		return config.Entry{}, false, nil, nil, err
+	}
+	return connectWithStartup(ctx, opts, command, cfg, onChange)
+}
+
+type startupResult struct {
+	entry      config.Entry
+	configured bool
+	session    *mcp.ClientSession
+	tools      []*mcp.Tool
+	err        error
+	finished   time.Time
+}
+
+func connectWithStartup(ctx context.Context, opts proxyOptions, command []string, cfg config.Config, onChange func(string)) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
+	if opts.startupTimeout == 0 {
+		return connectWithConfig(ctx, opts, command, cfg, onChange)
+	}
+	if err := ctx.Err(); err != nil {
+		return config.Entry{}, false, nil, nil, err
+	}
+	startupCtx, cancel := context.WithCancel(ctx)
+	attempt := newStartupAttempt()
+	opts.startup = attempt
+	opts.startupContext = startupCtx
+	result := make(chan startupResult, 1)
+	deadline := time.Now().Add(opts.startupTimeout)
+	timer := time.NewTimer(opts.startupTimeout)
+	defer timer.Stop()
+	go func() {
+		entry, configured, session, tools, err := connectWithConfig(startupCtx, opts, command, cfg, onChange)
+		result <- startupResult{entry, configured, session, tools, err, time.Now()}
+	}()
+	select {
+	case ready := <-result:
+		if ctx.Err() != nil {
+			cancel()
+			attempt.stop()
+			if ready.session != nil {
+				go ready.session.Close()
+			}
+			return config.Entry{}, false, nil, nil, ctx.Err()
+		}
+		if ready.finished.After(deadline) {
+			cancel()
+			attempt.stop()
+			if ready.session != nil {
+				go ready.session.Close()
+			}
+			return startupTimeoutError(opts, attempt)
+		}
+		if ready.err != nil {
+			cancel()
+			attempt.stop()
+		}
+		return ready.entry, ready.configured, ready.session, ready.tools, ready.err
+	case <-ctx.Done():
+		cancel()
+		attempt.stop()
+		go closeLateStartup(result)
+		return config.Entry{}, false, nil, nil, ctx.Err()
+	case <-timer.C:
+		if ctx.Err() != nil {
+			cancel()
+			attempt.stop()
+			go closeLateStartup(result)
+			return config.Entry{}, false, nil, nil, ctx.Err()
+		}
+		cancel()
+		attempt.stop()
+		go closeLateStartup(result)
+		return startupTimeoutError(opts, attempt)
+	}
+}
+
+func startupTimeoutError(opts proxyOptions, attempt *startupAttempt) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
+	phase, pid := attempt.snapshot()
+	slog.Error("upstream startup timed out", "entry", opts.entry, "timeout", opts.startupTimeout, "phase", phase, "pid", pid)
+	return config.Entry{}, false, nil, nil, fmt.Errorf("upstream %q startup timed out after %s during %s (pid %d): %w", opts.entry, opts.startupTimeout, phase, pid, context.DeadlineExceeded)
+}
+
+func closeLateStartup(result <-chan startupResult) {
+	ready := <-result
+	if ready.session != nil {
+		_ = ready.session.Close()
+	}
+}
+
 func connectWithConfig(ctx context.Context, opts proxyOptions, command []string, cfg config.Config, onChange func(string)) (config.Entry, bool, *mcp.ClientSession, []*mcp.Tool, error) {
 	entry, configured := cfg.EffectiveEntry(opts.entry)
 	if configured {
@@ -397,13 +497,19 @@ func connectWithConfig(ctx context.Context, opts proxyOptions, command []string,
 		}
 	}
 	client := newUpstreamClient(onChange)
+	if opts.startup != nil {
+		opts.startup.setPhase("launch")
+	}
 	transport, err := newTransport(opts, command)
 	if err != nil {
 		return config.Entry{}, false, nil, nil, err
 	}
-	session, tools, err := connectTools(ctx, client, transport)
+	if opts.startup != nil && opts.transport != "stdio" {
+		opts.startup.setPhase("initialize")
+	}
+	session, tools, err := connectTools(ctx, client, transport, opts.startup)
 	if err != nil && opts.transport == "auto" && isProtocolIncompatibility(err) && isLegacySSEEndpoint(ctx, opts) {
-		session, tools, err = connectTools(ctx, client, &mcp.SSEClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)})
+		session, tools, err = connectTools(ctx, client, &mcp.SSEClientTransport{Endpoint: opts.url, HTTPClient: httpClientWithContext(opts.headers, opts.headerEnv, opts.startupContext)}, opts.startup)
 	}
 	if err != nil {
 		return config.Entry{}, false, nil, nil, fmt.Errorf("connect upstream %q: %w", opts.entry, err)
@@ -426,17 +532,34 @@ func isProtocolIncompatibility(err error) bool {
 	return false
 }
 
-func connectTools(ctx context.Context, client *mcp.Client, transport mcp.Transport) (*mcp.ClientSession, []*mcp.Tool, error) {
+func connectTools(ctx context.Context, client *mcp.Client, transport mcp.Transport, startup *startupAttempt) (*mcp.ClientSession, []*mcp.Tool, error) {
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := session.ListTools(ctx, nil)
-	if err != nil {
-		session.Close()
-		return nil, nil, err
+	if startup != nil {
+		startup.setPhase("tools/list")
 	}
-	return session, result.Tools, nil
+	var tools []*mcp.Tool
+	cursor := ""
+	seen := make(map[string]bool)
+	for {
+		result, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
+		if err != nil {
+			session.Close()
+			return nil, nil, err
+		}
+		tools = append(tools, result.Tools...)
+		if result.NextCursor == "" {
+			return session, tools, nil
+		}
+		if seen[result.NextCursor] {
+			session.Close()
+			return nil, nil, fmt.Errorf("upstream tools/list repeated cursor %q", result.NextCursor)
+		}
+		seen[result.NextCursor] = true
+		cursor = result.NextCursor
+	}
 }
 
 func newUpstreamClient(onChange func(kind string)) *mcp.Client {
@@ -613,13 +736,13 @@ func newTransport(opts proxyOptions, command []string) (mcp.Transport, error) {
 	case "stdio":
 		cmd := exec.Command(command[0], command[1:]...)
 		cmd.Stderr = os.Stderr
-		return &normalizedCommandTransport{command: cmd}, nil
+		return &normalizedCommandTransport{command: cmd, startup: opts.startup}, nil
 	case "streamable-http":
-		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
+		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClientWithContext(opts.headers, opts.headerEnv, opts.startupContext)}, nil
 	case "auto":
-		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
+		return &mcp.StreamableClientTransport{Endpoint: opts.url, HTTPClient: httpClientWithContext(opts.headers, opts.headerEnv, opts.startupContext)}, nil
 	case "sse":
-		return &mcp.SSEClientTransport{Endpoint: opts.url, HTTPClient: httpClient(opts.headers, opts.headerEnv)}, nil
+		return &mcp.SSEClientTransport{Endpoint: opts.url, HTTPClient: httpClientWithContext(opts.headers, opts.headerEnv, opts.startupContext)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported transport %q", opts.transport)
 	}
@@ -635,7 +758,7 @@ func isLegacySSEEndpoint(ctx context.Context, opts proxyOptions) bool {
 		return false
 	}
 	request.Header.Set("Accept", "text/event-stream")
-	response, err := httpClient(opts.headers, opts.headerEnv).Do(request)
+	response, err := httpClientWithContext(opts.headers, opts.headerEnv, opts.startupContext).Do(request)
 	if err != nil {
 		return false
 	}
@@ -654,17 +777,29 @@ func isLegacySSEEndpoint(ctx context.Context, opts proxyOptions) bool {
 }
 
 func httpClient(headers headerFlags, headerEnv headerEnvFlags) *http.Client {
-	return &http.Client{Transport: headerTransport{headers: headers, headerEnv: headerEnv, next: http.DefaultTransport}}
+	return httpClientWithContext(headers, headerEnv, nil)
+}
+
+func httpClientWithContext(headers headerFlags, headerEnv headerEnvFlags, lifetime context.Context) *http.Client {
+	return &http.Client{Transport: headerTransport{headers: headers, headerEnv: headerEnv, next: http.DefaultTransport, lifetime: lifetime}}
 }
 
 type headerTransport struct {
 	headers   headerFlags
 	headerEnv headerEnvFlags
 	next      http.RoundTripper
+	lifetime  context.Context
 }
 
 func (t headerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	copy := request.Clone(request.Context())
+	var cleanup func()
+	if t.lifetime != nil {
+		ctx, cancel := context.WithCancel(request.Context())
+		stop := context.AfterFunc(t.lifetime, cancel)
+		copy = request.Clone(ctx)
+		cleanup = func() { stop(); cancel() }
+	}
 	for _, header := range t.headers {
 		name, value, _ := strings.Cut(header, "=")
 		copy.Header.Set(name, value)
@@ -675,7 +810,27 @@ func (t headerTransport) RoundTrip(request *http.Request) (*http.Response, error
 			copy.Header.Set(name, value)
 		}
 	}
-	return t.next.RoundTrip(copy)
+	response, err := t.next.RoundTrip(copy)
+	if cleanup != nil {
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		response.Body = &startupResponseBody{ReadCloser: response.Body, done: cleanup}
+	}
+	return response, err
+}
+
+type startupResponseBody struct {
+	io.ReadCloser
+	done func()
+	once sync.Once
+}
+
+func (b *startupResponseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.done)
+	return err
 }
 
 func overlayTool(tool *mcp.Tool, patch map[string]any) (*mcp.Tool, error) {

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -217,6 +219,87 @@ func TestParseProxyFlagsUsesConfiguredToolTimeout(t *testing.T) {
 	}
 	if opts.timeout != 3*time.Second {
 		t.Fatalf("unexpected timeout: %s", opts.timeout)
+	}
+}
+
+func TestParseStartupTimeout(t *testing.T) {
+	opts, _, err := parseProxyFlags([]string{"test", "--startup-timeout", "250ms", "--", "upstream"})
+	if err != nil || opts.startupTimeout != 250*time.Millisecond {
+		t.Fatalf("startup timeout = %s, %v", opts.startupTimeout, err)
+	}
+	_, _, err = parseProxyFlags([]string{"test", "--startup-timeout", "-1s", "--", "upstream"})
+	if err == nil || !strings.Contains(err.Error(), "startup-timeout must be nonnegative") {
+		t.Fatalf("negative startup timeout: %v", err)
+	}
+}
+
+func TestStartupTimeoutAndSessionLifetime(t *testing.T) {
+	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
+	command := func(mode string) []string {
+		return []string{os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", mode}
+	}
+	for _, tc := range []struct{ mode, phase string }{{"hang-initialize", "initialize"}, {"hang-tools", "tools/list"}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			opts := proxyOptions{entry: "test", transport: "stdio", startupTimeout: 200 * time.Millisecond}
+			start := time.Now()
+			_, _, _, _, err := connectWithStartup(context.Background(), opts, command(tc.mode), config.Config{}, nil)
+			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.phase) {
+				t.Fatalf("startup error = %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("startup failure took %s", elapsed)
+			}
+		})
+	}
+	opts := proxyOptions{entry: "test", transport: "stdio", startupTimeout: 2 * time.Second}
+	_, _, session, _, err := connectWithStartup(context.Background(), opts, command("upstream"), config.Config{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	time.Sleep(2200 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := session.ListTools(ctx, nil); err != nil {
+		t.Fatalf("healthy session closed at startup deadline: %v", err)
+	}
+}
+
+func TestStartupCancellationAndImmediateExit(t *testing.T) {
+	t.Setenv("MCP_FILTER_TEST_HELPER", "1")
+	command := func(mode string) []string {
+		return []string{os.Args[0], "-test.run=TestMCPFilterHelperProcess", "--", mode}
+	}
+	opts := proxyOptions{entry: "test", transport: "stdio", startupTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
+	_, _, _, _, err := connectWithStartup(ctx, opts, command("hang-initialize"), config.Config{}, nil)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancellation = %v", err)
+	}
+	_, _, _, _, err = connectWithStartup(context.Background(), opts, command("exit-upstream"), config.Config{}, nil)
+	if err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("exit error = %v", err)
+	}
+}
+
+func TestHTTPStartupTimeout(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() { close(release); upstream.Close() }()
+	opts := proxyOptions{entry: "test", transport: "streamable-http", url: upstream.URL, startupTimeout: 200 * time.Millisecond}
+	start := time.Now()
+	_, _, _, _, err := connectWithStartup(context.Background(), opts, nil, config.Config{}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "initialize") {
+		t.Fatalf("HTTP startup error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("HTTP startup failure took %s", elapsed)
 	}
 }
 
@@ -956,6 +1039,16 @@ func TestMCPFilterHelperProcess(t *testing.T) {
 	switch args[0] {
 	case "upstream":
 		err = runE2EUpstream(context.Background(), len(args) > 1 && args[1] == "errors")
+	case "hang-initialize":
+		time.Sleep(time.Hour)
+	case "hang-tools":
+		reader := bufio.NewScanner(os.Stdin)
+		if reader.Scan() {
+			fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"hang-tools","version":"1"}}}`)
+		}
+		time.Sleep(time.Hour)
+	case "exit-upstream":
+		os.Exit(7)
 	default:
 		err = proxy(context.Background(), args)
 	}
