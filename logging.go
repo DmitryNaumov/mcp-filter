@@ -17,7 +17,7 @@ import (
 func configureLogger(cfg config.Config, configPath, entry string) (func() error, error) {
 	logging := cfg.Logging
 	if logging == nil {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo, ReplaceAttr: safeLogAttr})).With("entry", entry, "pid", os.Getpid(), "source", "filter", "run_id", runID))
 		return func() error { return nil }, nil
 	}
 	if logging.Directory == nil || strings.TrimSpace(*logging.Directory) == "" {
@@ -39,19 +39,22 @@ func configureLogger(cfg config.Config, configPath, entry string) (func() error,
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
+	if err := loadFingerprintKey(directory); err != nil {
+		return nil, fmt.Errorf("load diagnostic fingerprint key: %w", err)
+	}
 	file, err := os.OpenFile(filepath.Join(directory, entryLogFileName(entry)), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
 
-	options := &slog.HandlerOptions{Level: level}
+	options := &slog.HandlerOptions{Level: level, ReplaceAttr: safeLogAttr}
 	var handler slog.Handler
 	if format == "json" {
 		handler = slog.NewJSONHandler(file, options)
 	} else {
 		handler = slog.NewTextHandler(file, options)
 	}
-	slog.SetDefault(slog.New(handler).With("entry", entry, "pid", os.Getpid(), "source", "filter"))
+	slog.SetDefault(slog.New(handler).With("entry", entry, "pid", os.Getpid(), "source", "filter", "run_id", runID))
 	return file.Close, nil
 }
 

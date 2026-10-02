@@ -572,9 +572,11 @@ func TestProxyLogsMalformedUpstreamToolResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logContents), `"msg":"upstream tool call failed"`) ||
+	if !strings.Contains(string(logContents), `"event":"upstream_call_result"`) ||
 		!strings.Contains(string(logContents), `"tool":"corrupt"`) ||
-		!strings.Contains(string(logContents), "invalid trailing data at the end of stream") {
+		!strings.Contains(string(logContents), `"outcome":"transport_error"`) ||
+		!strings.Contains(string(logContents), `"error_fingerprint":`) ||
+		strings.Contains(string(logContents), "invalid trailing data at the end of stream") {
 		t.Fatalf("missing upstream call error in log: %s", logContents)
 	}
 }
@@ -634,7 +636,7 @@ func TestProxyLogsUpstreamToolErrorResultWithoutContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logContents), `"msg":"upstream tool returned error"`) ||
+	if !strings.Contains(string(logContents), `"outcome":"upstream_is_error"`) ||
 		!strings.Contains(string(logContents), `"tool":"failure"`) ||
 		strings.Contains(string(logContents), "private issue details") {
 		t.Fatalf("unexpected upstream error log: %s", logContents)

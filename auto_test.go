@@ -230,7 +230,7 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 		t.Fatal("forwarded tool arguments leaked into logs")
 	}
 	called := map[string]bool{}
-	results := map[string]bool{}
+	results := map[int]bool{}
 	searchKeywordsLogged := false
 	describedToolLogged := false
 	calledToolLogged := false
@@ -245,7 +245,7 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 			if event["entry"] != "test" {
 				t.Fatalf("helper call missing entry: %#v", event)
 			}
-			if toolName == "search_tools" && reflect.DeepEqual(event["keywords"], []any{"issue"}) {
+			if toolName == "search_tools" && event["keywords"] == nil {
 				searchKeywordsLogged = true
 			}
 			if toolName == "describe_tool" && event["target"] == "b" {
@@ -256,7 +256,10 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 			}
 		}
 		if event["msg"] == "search_tools result" {
-			results[event["result"].(string)] = true
+			results[int(event["match_count"].(float64))] = true
+			if event["result"] != nil {
+				t.Fatal("search result leaked")
+			}
 		}
 	}
 	for _, name := range helperNames {
@@ -264,11 +267,11 @@ func TestAutoDiscoveryActivationAndReload(t *testing.T) {
 			t.Fatalf("missing %s call log: %s", name, logs.String())
 		}
 	}
-	if !results[`[{"name":"b","summary":"Find an issue","activated":false}]`] || !results["[]"] {
+	if !results[1] || !results[0] {
 		t.Fatalf("missing search result logs: %s", logs.String())
 	}
 	if !searchKeywordsLogged || !describedToolLogged || !calledToolLogged {
-		t.Fatalf("helper call logs lack search keywords or target names: %s", logs.String())
+		t.Fatalf("helper call logs leak keywords or lack target names: %s", logs.String())
 	}
 }
 

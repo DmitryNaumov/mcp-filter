@@ -52,6 +52,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var err error
+	isProxy := false
 	switch os.Args[1] {
 	case "validate":
 		err = validate(ctx, os.Args[2:])
@@ -61,9 +62,13 @@ func main() {
 		fmt.Println(versionDetails())
 		return
 	default:
+		isProxy = true
 		err = proxy(ctx, os.Args[1:])
 	}
 	if err != nil {
+		if isProxy {
+			fatal(fmt.Sprintf("MCP proxy failed: class=%s fingerprint=%s", errorClass(err), messageFingerprint(err.Error())))
+		}
 		fatal(err.Error())
 	}
 }
@@ -74,6 +79,21 @@ func versionDetails() string {
 		return formatVersionDetails(nil)
 	}
 	return formatVersionDetails(info)
+}
+
+func linkedSDKVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/modelcontextprotocol/go-sdk" {
+				if dep.Replace != nil {
+					return dep.Replace.Version + " (replacement)"
+				}
+				return dep.Version
+			}
+		}
+	}
+	return "unavailable"
 }
 
 func formatVersionDetails(info *debug.BuildInfo) string {
@@ -138,12 +158,19 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 		return err
 	}
 	defer closeLogger()
+	phase := "upstream_startup"
 	defer func() {
 		if proxyErr != nil {
-			slog.Error("MCP proxy failed", "error", proxyErr)
+			fields := append([]any{"event", "proxy_end", "phase", phase}, errorFields(proxyErr)...)
+			if errors.Is(proxyErr, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+				slog.Info("MCP proxy cancelled", append(fields, "reason", "host_cancelled")...)
+				proxyErr = nil
+			} else {
+				slog.Error("MCP proxy failed", fields...)
+			}
 		}
 	}()
-	slog.Info("MCP proxy starting", "transport", opts.transport)
+	slog.Info("MCP proxy starting", "transport", opts.transport, "build", versionDetails(), "sdk_version", linkedSDKVersion(), "diagnostics_version", 2)
 	toolChanges := make(chan struct{}, 1)
 	entry, configured, session, tools, err := connectWithStartup(ctx, opts, command, cfg, func(kind string) {
 		if kind != "tools" {
@@ -159,6 +186,7 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 		return err
 	}
 	defer session.Close()
+	phase = "proxy_setup"
 	slog.Info("connected upstream", "transport", opts.transport, "configured", configured, "tool_count", len(tools))
 
 	implementation, instructions, err := overlayServer(opts.entry, session, entry.Metadata.Server)
@@ -174,6 +202,7 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 			Resources: &mcp.ResourceCapabilities{ListChanged: true},
 		},
 	})
+	server.AddReceivingMiddleware(clientContextMiddleware(opts.entry))
 	primitives, err := newPrimitiveState(ctx, server, session)
 	if err != nil {
 		return err
@@ -200,7 +229,8 @@ func proxy(ctx context.Context, args []string) (proxyErr error) {
 		primitives.apply(prepared)
 		return nil
 	})
-	return server.Run(ctx, &mcp.StdioTransport{})
+	phase = "client_session"
+	return runClientSession(ctx, server, &mcp.StdioTransport{})
 }
 
 func validate(ctx context.Context, args []string) error {

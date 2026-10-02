@@ -177,12 +177,10 @@ func (s *toolState) forward(ctx context.Context, name string, args any, validate
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 	}
+	start := time.Now()
+	id := fmt.Sprintf("%s:%d", runID, callSequence.Add(1))
 	result, err := s.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-	if err != nil {
-		slog.Error("upstream tool call failed", "entry", s.entryName, "tool", name, "trigger", trigger, "error", err)
-	} else if result != nil && result.IsError {
-		slog.Error("upstream tool returned error", "entry", s.entryName, "tool", name, "trigger", trigger)
-	}
+	logCallResult(ctx, s.entryName, name, trigger, id, start, result, err)
 	return result, err
 }
 
@@ -331,7 +329,7 @@ func (s *toolState) search(_ context.Context, request *mcp.CallToolRequest) (*mc
 	if err := decodeHelper(request, &input); err != nil {
 		return nil, err
 	}
-	slog.Info("helper tool called", "entry", s.entryName, "tool", "search_tools", "keywords", input.Keywords)
+	slog.Info("helper tool called", "entry", s.entryName, "tool", "search_tools")
 	if len(input.Keywords) == 0 {
 		return nil, fmt.Errorf("keywords must contain at least one search word, for example {\"keywords\":[\"issue\",\"task\"]}")
 	}
@@ -396,7 +394,7 @@ func (s *toolState) search(_ context.Context, request *mcp.CallToolRequest) (*mc
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("search_tools result", "entry", s.entryName, "result", result.Content[0].(*mcp.TextContent).Text)
+	slog.Info("search_tools result", "entry", s.entryName, "match_count", len(hits))
 	return result, nil
 }
 

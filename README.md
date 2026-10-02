@@ -39,11 +39,31 @@ Prompts, resources и resource templates передаются без фильт�
 }
 ```
 
-`directory` разрешается относительно каталога rules-файла. Поддерживаются уровни `error`, `warn`, `info`, `debug` и форматы `text`, `json`; по умолчанию — `info` и `text`. Если раздел `logging` отсутствует, сообщения уровня `info` и выше записываются в `stderr`, а файлов не создаётся. На уровне `info` записываются вызовы `search_tools`, `describe_tool`, `call_tool` (имя инструмента; для поиска также ключевые слова) и точный результат `search_tools`, включая короткие описания найденных инструментов. Аргументы и результаты вызова найденного инструмента через `call_tool`, полная схема из `describe_tool`, HTTP-заголовки и значения окружения в лог не попадают. Явно заданный более высокий уровень логирования может скрыть события `info`.
+`directory` разрешается относительно каталога rules-файла. Поддерживаются уровни `error`, `warn`, `info`, `debug` и форматы `text`, `json`; по умолчанию — `info` и `text`. Без `logging` сообщения идут в `stderr`. Более высокий уровень скрывает события INFO, поэтому для подсчёта всех вызовов нужен `info`.
 
-При запуске proxy файл лога открывается до подключения к upstream MCP-серверу. На уровне `info` в него сразу записывается событие начала работы; ошибки подключения и другие ошибки proxy записываются на уровне `error` перед завершением процесса.
+Proxy открывает лог до подключения upstream. Запуск содержит `run_id`, `pid`, `entry`, `build`, `sdk_version` и `diagnostics_version`. `build` сообщает revision, когда Go сохранил VCS metadata; `unavailable` нельзя считать версией установленного бинаря. Исторические логи без этих полей не позволяют установить версию. `source=filter` отличает фильтр от upstream; stderr upstream по-прежнему передаётся хосту отдельно.
 
-Ошибки вызова upstream-инструментов также записываются на уровне `error`: имя entry, имя инструмента, способ вызова и текст ошибки транспорта или протокола. Если upstream вернул результат с `isError: true`, лог фиксирует этот факт без содержимого результата. Ответ клиенту передаётся без изменений.
+| event | поля и семантика |
+| --- | --- |
+| `upstream_call_result` | Одна запись завершения каждого отправленного upstream tools/call: `entry`, `tool`, `trigger` (`direct_call` / `call_tool`), `duration_ms`, `correlation_id`, `correlation_scope=filter_local`, `outcome`. |
+| `client_session_end` | `reason=client_closed` при нормальном окончании сессии (включая EOF, который SDK нормализует в nil); `host_cancelled` при подтверждённой отмене родительского контекста. INFO. Неожиданные ошибки сессии: `client_transport_error`, ERROR. |
+| `proxy_end` | При отказе proxy: `phase=upstream_startup` / `proxy_setup` / `client_session`, `error_class`, `error_fingerprint`. ERROR, кроме подтверждённого `host_cancelled` (INFO, успешное завершение процесса). |
+
+`outcome=success` означает, что SDK вернул результат без transport error и без `IsError`. `upstream_is_error`, `transport_error`, `timeout` пишутся в ERROR; `cancelled` — INFO только если контекст вызова действительно отменён, иначе ERROR. Ошибки содержат `error_class` и `error_fingerprint`; тип `other` — запасной класс для ошибок, не распознанных через `errors.Is`. `IsError` имеет класс `tool_error`. Отказ политики, локальная валидация, discovery helpers и другие MCP методы не являются отправленным upstream tools/call и не включаются в эти счётчики. Ответы клиенту передаются без изменений. При аварии proxy финальное сообщение в stderr также содержит только класс и fingerprint; детали конфигурационных ошибок удобно проверять отдельной командой `validate`.
+
+Fingerprint — HMAC-SHA256 точного текста ошибки; для `IsError` — текстовых content-блоков с границами длины. Без текстовых блоков используется fingerprint пустого сообщения, поэтому он не различает такие ошибки. Это позволяет группировать одинаковые сообщения, не записывая их приватный текст. В каталоге логов автоматически создаётся `.fingerprint-key` (0600), общий для entries; его нельзя публиковать или передавать вместе с логами. Fingerprint стабилен при сохранении ключа; смена ключа меняет все fingerprints. Без файлового логирования ключ живёт только один запуск. Не используется обычный SHA аргументов/сообщений, допускающий проверку догадок по словарю.
+
+Сырые аргументы, ответы, тексты ошибок, HTTP-заголовки и окружение не записываются новыми событиями. Error-атрибуты SDK и прочих диагностик также заменяются безопасным классом/fingerprint; SDK URI заменяются fingerprint. Сохраняются имена tools, цели helpers, lifecycle, reload и startup timeout phase/pid. В отличие от прежней политики, `search_tools` записывает число совпадений вместо точного результата, а keywords больше не сохраняются: оба поля могли содержать приватный текст. Append-only хранение и отсутствие ротации не изменены; старые файлы могут содержать ранее записанные тексты.
+
+Для поиска конкретного сбоя приведите время Monitor и лога к UTC, выберите `entry` + `tool` + интервал времени, затем сохраните `run_id` / `correlation_id`. Например:
+
+```sh
+jq 'select(.event == "upstream_call_result" and .tool == "GetIssues" and .outcome != "success") | {time,entry,run_id,correlation_id,trigger,outcome,error_class,error_fingerprint}' tracker_mcp.log
+```
+
+`correlation_id` — случайный ID запуска + порядковый номер upstream-вызова, **локальный для фильтра**, не Codex `call_id`. Дополнительно клиент может передать собственные ID в `_meta` — см. ниже. Go SDK v1.3.1 не предоставляет исходный JSON-RPC ID в публичных `CallToolRequest`, `RequestExtra` или receiving middleware. SDK создаёт собственный ID при отправке upstream; ID в cancellation notification не является доступом к ID текущего вызова. Мы не перехватываем stdio framing и не передаём выдуманный ID в `_meta`. Fingerprint аргументов намеренно отсутствует, чтобы не раскрывать чувствительные значения или их равенство.
+
+Сопоставление с Codex Monitor по tool и времени остаётся приблизительным; одинаковые параллельные вызовы неоднозначны. Этот HMAC не совместим с fingerprints Monitor без общего алгоритма и ключа (ключ не следует экспортировать). Перед сравнением агрегатов проверьте версии, интервалы, timezone, клиентов, покрытие entries, direct/helper пути, уровень логирования и значение success в Monitor. Ошибка Monitor может произойти до отправки upstream или после успешного ответа фильтра; отсутствие ERROR в фильтре не доказывает ошибку нормализации. Без сырых событий Monitor нельзя подтвердить причину расхождения GetIssues.
 
 ## Раскрытие инструментов по запросу
 
@@ -96,3 +116,46 @@ Prompts, resources и resource templates передаются без фильт�
 4. Разработчик создаёт `.mcp-filter.local.json` для личных правил; файл добавлен в `.gitignore`.
 
 Конфигурация подключения не переносится в `mcp-filter`; общий источник правды — только правила фильтрации и метаданные. Это сохраняет привычное место регистрации каждого MCP-сервера и не вводит вторую модель transport-конфигурации.
+
+## Диагностика клиентского контекста (diagnostics_version=2)
+
+Для эксперимента с корреляцией Codex на уровне INFO записываются:
+
+| event | Что связывает |
+| --- | --- |
+| `client_connection_start` | Локальный `client_connection_id` (ID запуска + номер подключения), `ppid`, необязательный `launcher_thread_id_fingerprint` из `CODEX_THREAD_ID`. |
+| `client_initialize_context` | Тот же connection ID, результат initialize, распознанное семейство клиента, numeric version/protocol version и fingerprints имени/версии клиента; доступные session/thread/turn/call fingerprints из initialize. |
+| `client_call_context` | Connection ID + локальный `client_request_id`, `client_tool` (включая helpers), доступные клиентские ID и сведения о наличии metadata. Записывается перед обработчиком, поэтому виден и при локальном отказе. |
+| `upstream_call_result` | Теперь дополнительно содержит connection/request IDs, `client_tool` и те же клиентские fingerprints. Поле `tool` по-прежнему обозначает целевой upstream tool, в том числе при `client_tool=call_tool`. |
+| `client_session_end` | Тот же connection ID для поиска конца подключения. |
+
+`client_connection_scope=filter_local`: локальное MCP-подключение не обязательно равно одному чату Codex. `client_request_id` также локален, не является JSON-RPC ID или Codex call ID. Сначала найдите сбой в `upstream_call_result`, затем выберите записи `client_call_context` с тем же `client_request_id` и `client_initialize_context` / `client_session_end` с тем же `client_connection_id`:
+
+```sh
+jq 'select(.client_connection_id == "RUN:connection:1")' tracker_mcp.log
+```
+
+Проверка выполняется только для разрешённых полей: `_meta["openai/session"]` и `_meta["x-codex-turn-metadata"]` с `threadId`, `turnId`, `callId`. Последний принимается как объект или строка с JSON-объектом (до 8192 bytes); для HTTP RequestExtra поддерживается одноимённый заголовок, если SDK его предоставляет. ID должны быть непустыми строками до 512 bytes без пробелов по краям. Некорректные значения игнорируются, вызов инструмента остаётся неизменным. Записываются `client_meta_field_count`, `codex_turn_metadata_present` и статус `absent` / `object` / `json_object` / `invalid`, без неизвестных ключей или значений. Отсутствие fingerprints может означать как отсутствие ID, так и неподдерживаемый формат.
+
+Для каждого найденного ID есть `client_{session,thread,turn,call}_id_fingerprint` и `client_*_id_source`. Текущий запрос имеет приоритет над initialize. Из initialize наследуются только session/thread с источником `initialize_meta...`; turn/call не наследуются ни из initialize, ни из предыдущего вызова. Клиентские ID — утверждения клиента, не подтверждённая идентичность. `launcher_thread_id_fingerprint` из env — лишь подсказка о launcher, он не подставляется вместо thread текущего запроса. Для неизвестного clientInfo сохраняются только fingerprints; `client_family=codex` — подсказка по известным именам, а не проверка подлинности.
+
+Поддержка этого metadata в обычном MCP Codex не подтверждена: строки `x-codex-turn-metadata`, `threadId`, `turnId`, `callId` обнаружены в локальном бинаре 0.160.0, но могут относиться к встроенным коннекторам. Документированное `openai/session` относится к ChatGPT. Экспериментальные записи покажут, что приходит фактически. Метаданные не передаются upstream и не добавляются в аргументы или ответы.
+
+Fingerprint клиентского ID считается как HMAC-SHA256 от `client-id\0KIND\0ID`, где KIND — `session`, `thread`, `turn` или `call`. Чтобы сопоставить известный ID из Monitor с логом, вычислите fingerprint локально с ключом каталога логов, не публикуя ключ. Этот пример спрашивает ID без отображения и не помещает его в историю shell:
+
+```sh
+python3 -c '
+import getpass, hashlib, hmac
+from pathlib import Path
+key_path = Path(input("Путь к .fingerprint-key: "))
+kind = input("Тип ID (session/thread/turn/call): ")
+if kind not in {"session", "thread", "turn", "call"}:
+    raise SystemExit("Неизвестный тип ID")
+value = getpass.getpass("ID из Monitor: ")
+key = key_path.read_bytes()
+message = ("client-id\0" + kind + "\0" + value).encode()
+print("hmac-sha256:" + hmac.new(key, message, hashlib.sha256).hexdigest())
+'
+```
+
+Одинаковый ID имеет одинаковый fingerprint в разных запусках с тем же ключом. Полученный fingerprint можно искать по соответствующему полю лога. Это устанавливает точную связь только если Monitor и MCP действительно содержат один и тот же исходный ID; одинаковое название `callId` этого не гарантирует. В текущем эксперименте не включены новые экспортеры, не изменена глобальная конфигурация и не перезапущены MCP-процессы: новые события появятся только при запуске собранного обновлённого фильтра.
